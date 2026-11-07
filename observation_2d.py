@@ -182,36 +182,46 @@ def _polyline_shape_invariants(pts, is_closed: bool) -> Dict[str, float]:
                   (1 = round, matching the symbolic observation's
                   convention, so the default 1.0 means "no anisotropy")
     """
+    pts = list(pts)
+    if is_closed and len(pts) >= 4:
+        if math.hypot(float(pts[-1][0]) - float(pts[0][0]),
+                      float(pts[-1][1]) - float(pts[0][1])) < 1e-6:
+            pts = pts[:-1]
     n = len(pts)
     if n < 3:
         return {"area": 0.0, "circularity": 0.0, "complexity": 0.0,
                 "roughness": 0.0, "isotropy": 0.0, "elongation": 1.0}
     xs = [float(p[0]) for p in pts]
     ys = [float(p[1]) for p in pts]
-    # The shoelace area and the perimeter.
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    # The shoelace area (for closed contours only) and the perimeter.
     area2 = 0.0
     perim = 0.0
     seg_dirs: List[float] = []
     m = n if is_closed else n - 1
     for i in range(m):
         j = (i + 1) % n
-        area2 += xs[i] * ys[j] - xs[j] * ys[i]
+        if is_closed:
+            area2 += (xs[i] - mx) * (ys[j] - my) - (xs[j] - mx) * (ys[i] - my)
         dx = xs[j] - xs[i]
         dy = ys[j] - ys[i]
         d = math.hypot(dx, dy)
         perim += d
         if d > 1e-9:
             seg_dirs.append(math.atan2(dy, dx))
-    area = abs(area2) * 0.5
-    # The turning at each interior vertex (and the closing vertex, when the
+    area = abs(area2) * 0.5 if is_closed else 0.0
+    # The turning at each interior vertex (and the closing vertices, when the
     # contour is closed).
     turns: List[float] = []
-    k = n if is_closed else n - 1
-    for i in range(1, n - 1):
-        ax = xs[i] - xs[i - 1]
-        ay = ys[i] - ys[i - 1]
-        bx = xs[i + 1] - xs[i]
-        by = ys[i + 1] - ys[i]
+    turn_indices = range(n) if is_closed else range(1, n - 1)
+    for i in turn_indices:
+        ip = (i - 1) % n
+        in_ = (i + 1) % n
+        ax = xs[i] - xs[ip]
+        ay = ys[i] - ys[ip]
+        bx = xs[in_] - xs[i]
+        by = ys[in_] - ys[i]
         la = math.hypot(ax, ay)
         lb = math.hypot(bx, by)
         if la < 1e-9 or lb < 1e-9:
@@ -220,8 +230,6 @@ def _polyline_shape_invariants(pts, is_closed: bool) -> Dict[str, float]:
         dot = ax * bx + ay * by
         turns.append(abs(math.atan2(cross, dot)))
     # The second-moment matrix of the boundary points (the inertia ellipse).
-    mx = sum(xs) / n
-    my = sum(ys) / n
     sxx = syy = sxy = 0.0
     for x, y in zip(xs, ys):
         dx = x - mx
@@ -425,6 +433,25 @@ class Observation2D(Observation):
 
         # [v9] T-junction detection on the final region list.
         self._t_junctions = _detect_t_junctions(self._regions)
+        self._surface_fragments: List[Any] = []
+        self._fragment_ownership_records: List[Dict[str, Any]] = []
+        self._light_prior: Optional[Any] = None
+
+    @property
+    def light_prior(self) -> Optional[Any]:
+        """Image-fitted illumination prior used for fragment shading cues."""
+        return self._light_prior
+
+    @property
+    def surface_fragments(self) -> List[Any]:
+        return list(self._surface_fragments)
+
+    def get_surface_fragments(self) -> List[Any]:
+        return list(self._surface_fragments)
+
+    @property
+    def fragment_ownership_records(self) -> List[Dict[str, Any]]:
+        return list(self._fragment_ownership_records)
 
     def modality(self) -> str:
         return "2d"
@@ -661,9 +688,9 @@ class Observation2D(Observation):
     # ------------------------------------------------------------------
 
     @classmethod
-    @classmethod
     def from_image(cls, raw_image, flag_indices=None, effect_indices=None,
-                   contours=None, rich: bool = True):
+                   contours=None, rich: bool = True,
+                   light_prior: Optional[Any] = None):
         """Pixel-to-graph bridge: run the two-stream front-end.
 
         Stream 1 (V1 lattice): tessellates the visual field into
@@ -772,106 +799,9 @@ class Observation2D(Observation):
         hypercolumn_regions = lattice.tile_with_features(
             h, w, complex_, bank.theta, bank.sf, lum, corrected_rgb
         )
-
-        if rich:
-            for r in hypercolumn_regions:
-                cx = max(0, min(w - 1, int(round(r["centroid"][0]))))
-                cy = max(0, min(h - 1, int(round(r["centroid"][1]))))
-                win = max(P.TEXTURE_MIN_WINDOW, int(r["radius_px"]))
-                y0, y1 = max(0, cy - win), min(h, cy + win + 1)
-                x0, x1 = max(0, cx - win), min(w, cx + win + 1)
-
-                window_slice = complex_[:, :, y0:y1, x0:x1]
-                r["interior_variance"] = float(np.var(window_slice)) if window_slice.size > 0 else 0.0
-                r["coarseness"] = _compute_coarseness(window_slice)
-                r["regularity"] = _compute_regularity(window_slice)
-                r["gabor_complex"] = window_slice.mean(axis=(2, 3)).astype(np.float32)
-
-                r["gabor_simple"] = simple[:, :, :, cy, cx].copy()
-                r["gabor_phase"] = phase[:, :, cy, cx].copy()
-                r["gabor_complex_pooled"] = complex_pooled[:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                r["gabor_complex_on"] = _on_resp["complex"][:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                r["gabor_complex_off"] = _off_resp["complex"][:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                # [O3] WINDOW STATISTICS, NOT ONE PIXEL PER REGION.
-                #
-                # These planes used to be read at the single pixel nearest the
-                # region's centroid. A pixel is a sample of noise -- a texture
-                # grain, a highlight, an anti-aliasing step -- so two regions
-                # with the SAME material could be described by opposite
-                # samples, and a region straddling a boundary by whichever
-                # side its centroid happened to land on. Every material plane
-                # is now the statistic of the region's OWN window. Phase and
-                # hue are circular, so they take a circular mean (a linear
-                # mean of angles is meaningless); the rest take a mean.
-                r["gabor_phase_on"] = _window_circular_mean_channels(
-                    _on_resp["phase"], y0, y1, x0, x1)
-                r["gabor_phase_off"] = _window_circular_mean_channels(
-                    _off_resp["phase"], y0, y1, x0, x1)
-                _opp_mean = [
-                    _window_mean(opponent[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["opponent"] = np.asarray(
-                    [float(opponent[cy, cx, _k]) if _opp_mean[_k] is None
-                     else _opp_mean[_k] for _k in range(3)], dtype=np.float32)
-                _ret = [
-                    _window_mean(retinex_res["lum_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["rg_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["by_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["sat_norm"], y0, y1, x0, x1),
-                    _window_circular_mean(retinex_res["hue"], y0, y1, x0, x1),
-                ]
-                _ret_point = (
-                    float(retinex_res["lum_comp"][cy, cx]),
-                    float(retinex_res["rg_comp"][cy, cx]),
-                    float(retinex_res["by_comp"][cy, cx]),
-                    float(retinex_res["sat_norm"][cy, cx]),
-                    float(retinex_res["hue"][cy, cx]),
-                )
-                r["opponent_retinex"] = tuple(
-                    _ret_point[_k] if _ret[_k] is None else float(_ret[_k])
-                    for _k in range(5))
-                _corr = [
-                    _window_mean(corrected_opp[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["corrected_opponent"] = np.asarray(
-                    [float(corrected_opp[cy, cx, _k]) if _corr[_k] is None
-                     else _corr[_k] for _k in range(3)], dtype=np.float32)
-                _rgb_mean = [
-                    _window_mean(corrected_rgb[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["corrected_rgb"] = np.asarray(
-                    [float(corrected_rgb[cy, cx, _k]) if _rgb_mean[_k] is None
-                     else _rgb_mean[_k] for _k in range(3)], dtype=np.float32)
-                _rgc = _window_mean(rg_contrast, y0, y1, x0, x1)
-                _byc = _window_mean(by_contrast, y0, y1, x0, x1)
-                r["rg_contrast"] = (float(rg_contrast[cy, cx])
-                                    if _rgc is None else float(_rgc))
-                r["by_contrast"] = (float(by_contrast[cy, cx])
-                                    if _byc is None else float(_byc))
-                r["local_edge"] = _local_edge_at(lum, cy, cx)
-
-                # [SPEED / TRAP 4] The B1/B4 rich block is NOT computed
-                # here. It used to be, and the all-regions loop below
-                # computed it AGAIN for every hypercolumn, so every rich
-                # region paid for the 433-slot B1 signature and the
-                # second-order B4 texture signature TWICE per frame.
-                #
-                # VALUE IDENTITY: the all-regions loop recomputes
-                # r["b1_sig"], r["b1_class"], r["b1_stats"], r["b4_sig"] and
-                # r["b4_class"] for every region for which
-                # `not r.get("is_boundary", False)` -- which is exactly the
-                # hypercolumn set, because the contour regions are the only
-                # boundary regions and they never received a B1/B4 block
-                # here in the first place. The all-regions loop therefore
-                # OVERWRITES every value this block would have written, so
-                # dropping it leaves the region dicts byte-identical. (The
-                # two blocks even use different windows -- this one is
-                # uncapped in radius, the all-regions loop caps the radius
-                # at 32 px -- which is precisely why the SECOND write is the
-                # one that survives today, and why the first is dead work.)
-                #
-                # `b4_register` is still called by the all-regions loop, so
-                # the TEXTURE_RICH class stays registered exactly as before.
+        # Note: per-region rich features (Gabor/Retinex/B1/B4) are populated
+        # once across `all_regions` below (with the 32 px radius cap), rather
+        # than computing and immediately overwriting an uncapped pass here.
 
         # --- Stream 2: Association Field Contours ---
         if contours is None:
@@ -1080,7 +1010,94 @@ class Observation2D(Observation):
         obj._gabor_complex = complex_
         obj._gabor_thetas = bank.theta
         obj._gabor_sfs = bank.sf
+
+        if rich:
+            obj._populate_surface_fragments(lum, corrected_rgb, light_prior=light_prior)
         return obj
+
+    def _populate_surface_fragments(
+        self,
+        lum: np.ndarray,
+        corrected_rgb: np.ndarray,
+        light_prior: Optional[Any] = None,
+    ) -> None:
+        """Compute fragment_ownership_records -> build_surface_fragments on the
+        observation's PEAK_CHAIN spine and store the resulting 2.5D fragments."""
+        from perception.lenses.peak_lens import PeakLens
+        from perception.lenses.chain_lens import ChainLens
+        from perception.fragment_ownership import fragment_ownership_records
+        from perception.interior_field import interior_field_for, ownership_from_enclosure
+        from perception.surface_fragments import (
+            LightPrior,
+            assign_depth_layers,
+            build_surface_fragments,
+            estimate_light_prior,
+            t_junction_order,
+        )
+
+        ext_scale = self.get_extraction_scale()
+        frag_pos: Dict[Any, Tuple[float, ...]] = dict(self.get_positions())
+        cur_dets: Dict[str, List[Any]] = {}
+
+        peak_lens = PeakLens()
+        peaks = peak_lens.step(
+            0, None, None, frag_pos, None, cur_dets,
+            extraction_scale=ext_scale, observation=self,
+        )
+        cur_dets["CONTOUR_PEAK"] = peaks
+
+        chain_lens = ChainLens()
+        chains = chain_lens.step(
+            0, None, None, frag_pos, None, cur_dets,
+            extraction_scale=ext_scale, observation=self,
+        )
+        cur_dets["PEAK_CHAIN"] = chains
+        if not chains:
+            return
+
+        tj_pts = [pt for _s, _t, pt, _c in self.get_t_junctions()]
+        records = fragment_ownership_records(
+            chains, frag_pos, observation=self,
+            extraction_scale=ext_scale, t_junction_positions=tj_pts,
+        )
+        self._fragment_ownership_records = list(records)
+        if not records:
+            return
+
+        if light_prior is None:
+            light_prior = _estimate_contour_light_prior(
+                records, lum, ext_scale, estimate_light_prior
+            )
+        self._light_prior = light_prior
+
+        ifield = interior_field_for(self, luminance=lum)
+        interior_arr = ifield.get("interior") if isinstance(ifield, dict) else None
+
+        def _enc_lookup(pt: Tuple[float, float], on: Tuple[float, float]) -> float:
+            if not isinstance(ifield, dict):
+                return 0.0
+            return ownership_from_enclosure(ifield, pt, on)
+
+        # Corpus-calibrated slant/tilt widths (contour_relations.py: 3.0 deg slant,
+        # 10.9 deg tilt) and scale-proportional flank sampling offsets.
+        flank_off = max(4.0, 0.55 * ext_scale)
+        flank_patch = max(3.0, 0.40 * ext_scale)
+        frags = build_surface_fragments(
+            records,
+            lum,
+            _enc_lookup,
+            light_prior,
+            interior=interior_arr,
+            sigma_contour=(3.0, 10.9),
+            shading_sigma=(3.0, 10.9),
+            shading_offset_px=flank_off,
+            shading_patch_px=flank_patch,
+            rgb=corrected_rgb,
+        )
+        if frags:
+            tj_edges = t_junction_order(frags, records)
+            assign_depth_layers(frags, records, extra_edges=tj_edges)
+        self._surface_fragments = list(frags)
 
     def get_gabor_responses(self, u):
         """Per-region Gabor summary, or None on the region path.
@@ -1186,3 +1203,66 @@ def _bilinear_resize(img, nh, nw):
         return zoom(img, (nh / img.shape[0], nw / img.shape[1], 1), order=1)
     return zoom(img, (nh / img.shape[0], nw / img.shape[1]), order=1)
 
+
+def _estimate_contour_light_prior(
+    records,
+    lum: np.ndarray,
+    ext_scale: float,
+    estimator,
+):
+    """Fit an image-specific light prior from measured owner-side flank samples.
+
+    The normals are geometric proxies formed from the measured contour
+    orientation plus the viewer axis; the luminance samples come from this
+    image. No renderer material, object label, or ground-truth light is read.
+    """
+    from perception.surface_fragments import LightPrior
+
+    L = np.asarray(lum, dtype=np.float64)
+    if L.ndim != 2 or L.size == 0:
+        return LightPrior((0.0, 0.0, 1.0), 0.0)
+    h, w = L.shape
+    step = max(2.0, 0.30 * max(float(ext_scale), 1.0))
+
+    normals = []
+    samples = []
+    for rec in records:
+        pos = rec.get("pos")
+        nrm = rec.get("normal")
+        signed = rec.get("signed")
+        if pos is None or nrm is None or signed is None:
+            continue
+        s = float(signed)
+        if not math.isfinite(s) or abs(s) < 0.05:
+            continue
+        nx, ny = float(nrm[0]), float(nrm[1])
+        mag = math.hypot(nx, ny)
+        if mag < 1e-9:
+            continue
+        owner_x = (nx / mag) * (1.0 if s > 0.0 else -1.0)
+        owner_y = (ny / mag) * (1.0 if s > 0.0 else -1.0)
+        sx = int(round(float(pos[0]) + step * owner_x))
+        sy = int(round(float(pos[1]) + step * owner_y))
+        if not (0 <= sx < w and 0 <= sy < h):
+            continue
+        value = float(L[sy, sx])
+        if not math.isfinite(value):
+            continue
+        # The measured rim normal points opposite the inward owner direction.
+        raw_normal = (-owner_x, -owner_y, 1.0)
+        nlen = math.sqrt(sum(v * v for v in raw_normal))
+        normals.append(tuple(v / nlen for v in raw_normal))
+        samples.append(value)
+
+    if len(samples) < 12:
+        return LightPrior((0.0, 0.0, 1.0), float(np.quantile(L, 0.02)))
+    try:
+        # estimate_light_prior expects a sequence of image planes paired with
+        # the corresponding measured normal fields; one observation is a
+        # one-scene calibration fit, not access to synthetic truth.
+        return estimator(
+            [np.asarray(samples, dtype=np.float64)],
+            [np.asarray(normals, dtype=np.float64)],
+        )
+    except (ValueError, TypeError, np.linalg.LinAlgError):
+        return LightPrior((0.0, 0.0, 1.0), float(np.quantile(L, 0.02)))

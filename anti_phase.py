@@ -133,19 +133,6 @@ def _claim_endpoints(det: Any) -> Optional[Tuple[Any, Any]]:
     return ent, nb
 
 
-def _claim_endpoints(det: Any) -> Optional[Tuple[Any, Any]]:
-    """(entity_anchor, neighbour_anchor) of a BorderOwnership detection."""
-    ent = getattr(det, "alpha", None)
-    nb = None
-    for role in getattr(det, "rho", ()) or ():
-        if len(role) >= 2 and role[0] == "neighbor":
-            nb = role[1]
-            break
-    if ent is None or nb is None or ent == nb:
-        return None
-    return ent, nb
-
-
 def border_ownership_claims(
     bo_dets: Sequence[Any],
     min_strength: Optional[float] = None,
@@ -203,8 +190,6 @@ def border_ownership_claims_directed(
     back-edge.
     """
     from perception.ownership import ownership_signed
-    if min_strength is None:
-        min_strength = derive_claim_threshold(bo_dets)
     if min_strength is None:
         min_strength = derive_claim_threshold(bo_dets)
     votes: Dict[Tuple[Any, Any], float] = {}

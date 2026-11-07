@@ -746,12 +746,13 @@ def contour_curvature(positions: Sequence[Tuple[float, float]],
     if n < 5:
         return None
     k = max(2, int(window))
-    idx = []
-    for j in range(-k, k + 1):
-        if closed:
-            idx.append((index + j) % n)
-        else:
-            idx.append(min(n - 1, max(0, index + j)))
+    if closed:
+        k_eff = min(k, (n - 1) // 2)
+        idx = [(index + j) % n for j in range(-k_eff, k_eff + 1)]
+    else:
+        m = min(n, 2 * k + 1)
+        start = max(0, min(index - k, n - m))
+        idx = list(range(start, start + m))
     pts = np.array([positions[j] for j in idx], dtype=np.float64)
     fit = _circle_fit(pts)
     if fit is None:
@@ -2493,14 +2494,15 @@ def t_junction_arms(fragments: Sequence[SurfaceFragment],
                 seen.add(want)
                 edges.append((bt.get("alpha"), a.get("alpha")))
     resolved = [(int(idx[na]), int(idx[fa])) for na, fa in edges
-                if na in idx and fa in idx]
+                if na in idx and fa in idx and int(idx[na]) != int(idx[fa])]
     diag = dict(arms=len(arms), sites=sites, through_pairs=through,
                 corners=corners, cross_figure=cross_figure, stems=stems_n,
                 tol=round(float(tol), 3),
                 edges=len(edges), index_edges=len(resolved),
                 stems_dropped=len(edges) - len(resolved))
+    diag["alpha_edges"] = edges
     diag["resolved"] = resolved
-    return edges, diag
+    return resolved, diag
 
 
 def assign_depth_layers(fragments: Sequence[SurfaceFragment],

@@ -380,13 +380,13 @@ def _convolve_same(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
             "convolution kernel sides must be odd for a centred 'same' "
             "result, got %dx%d" % (_kh, _kw))
     # [A5#7] both sides decide the branch, and each side gets its own pad.
-    if max(_kh, _kw) <= _FFT_KERNEL_THRESHOLD:
+    ph, pw = _kh // 2, _kw // 2
+    if max(_kh, _kw) <= _FFT_KERNEL_THRESHOLD or ph > img.shape[0] or pw > img.shape[1]:
         return nd_convolve(img, kernel, mode="reflect").astype(np.float32)
     # [FIX 3] scipy.signal.fftconvolve has no padding-mode argument, so
     # mode="same" ZERO-pads -- making large-kernel and small-kernel
     # responses non-comparable at the border. Pad manually so both paths
     # reflect-pad identically.
-    ph, pw = _kh // 2, _kw // 2
     padded = np.pad(img, ((ph, ph), (pw, pw)), mode="symmetric")
     return fftconvolve(padded, kernel, mode="valid").astype(np.float32)
 

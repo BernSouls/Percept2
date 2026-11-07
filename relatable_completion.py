@@ -692,11 +692,15 @@ def _bridge_candidates(arcs: List[Arc],
                     if (1.0 - align / 180.0) < rel_tol:
                         continue
 
-                    # Curvature of the minimal connector through the two
-                    # measured end points and the bridge midpoint.  It is
-                    # carried as a ranking tie-breaker, never as a hard gate.
-                    mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
-                    curvature = _circle_curvature(ax, ay, mx, my, bx, by)
+                    # Curvature of the minimal cubic-Hermite connector through
+                    # the two measured end points and their port tangents.  It
+                    # is carried as a ranking tie-breaker, never as a hard gate.
+                    mx = 0.5 * (ax + bx) + 0.125 * gap * (ta[0] - tb[0])
+                    my = 0.5 * (ay + by) + 0.125 * gap * (ta[1] - tb[1])
+                    curvature = max(
+                        _circle_curvature(ax, ay, mx, my, bx, by),
+                        2.0 * math.sin(0.5 * math.radians(turn)) / max(gap, 1e-6),
+                    )
 
                     candidates.append(Bridge(
                         a_idx=a_idx,
@@ -961,6 +965,7 @@ def relatable_completion(chain_dets: Sequence[Any],
     field_peaks_list: Optional[List] = None
     try:
         from perception.lenses.peak_lens import field_for_observation
+        from perception import chain_formation as CF
         _field = field_for_observation(observation)
         field_peaks_list = list(_field["peaks"])
         field_orientations = CF.continuous_orientations(
@@ -1010,7 +1015,7 @@ def relatable_completion(chain_dets: Sequence[Any],
             prev = 0
             for ji in sorted(set(junction_idxs)):
                 if ji > prev:
-                    parts.append((positions[prev:ji], anchors[prev:ji], False, True))
+                    parts.append((positions[prev:ji], anchors[prev:ji], prev > 0, True))
                 prev = ji + 1
             if prev < len(positions):
                 parts.append((positions[prev:], anchors[prev:], True, False))
@@ -1018,38 +1023,37 @@ def relatable_completion(chain_dets: Sequence[Any],
                 parts = [(positions, anchors, False, False)]
         else:
             parts = [(positions, anchors, False, False)]
+        part_closed = closed and not junction_idxs
         for part_pos, part_anc, jstart, jend in parts:
             if len(part_pos) < min_mem:
                 continue
             # Rebuild a dummy det-like for _fold_split (it needs chain_det for
             # chain_id only; members are passed via positions/anchors).
-            chain_arcs = _fold_split(det, part_pos, closed, part_anc, median_wl)
+            chain_arcs = _fold_split(det, part_pos, part_closed, part_anc, median_wl)
             for arc in chain_arcs:
                 arc.chain_id = det.alpha
                 arc.junction_cut_start = jstart
                 arc.junction_cut_end = jend
                 if jstart:
-                    # Cleanest tangent: from the arc's first members (furthest
-                    # from the junction), before the contour turns.
-                    if len(arc.positions) >= 4:
-                        pts = arc.positions[:2]
-                        dx = pts[1][0] - pts[0][0]
-                        dy = pts[1][1] - pts[0][1]
-                        mag = math.hypot(dx, dy)
-                        t = (dx / mag, dy / mag) if mag > 1e-9 else None
-                    else:
+                    t = _field_port_tangent(
+                        arc.positions, "start", field_orientations,
+                        field_peak_idx_by_pos, chain_position_sets,
+                        di, anchor_positions,
+                    )
+                    if t is None:
                         t = _port_tangent_junction(arc.positions, "start", port_depth)
-                    arc.start_port = t
+                    if t is not None:
+                        arc.start_port = t
                 if jend:
-                    if len(arc.positions) >= 4:
-                        pts = arc.positions[-2:]
-                        dx = pts[1][0] - pts[0][0]
-                        dy = pts[1][1] - pts[0][1]
-                        mag = math.hypot(dx, dy)
-                        t = (dx / mag, dy / mag) if mag > 1e-9 else None
-                    else:
+                    t = _field_port_tangent(
+                        arc.positions, "end", field_orientations,
+                        field_peak_idx_by_pos, chain_position_sets,
+                        di, anchor_positions,
+                    )
+                    if t is None:
                         t = _port_tangent_junction(arc.positions, "end", port_depth)
-                    arc.end_port = t
+                    if t is not None:
+                        arc.end_port = t
             all_arcs.extend(chain_arcs)
 
     if not all_arcs:

@@ -320,6 +320,10 @@ class ChainLens(HigherLens):
                 pa, pb = peaks[a], peaks[b]
                 length += math.hypot(float(pa.get("x", 0)) - float(pb.get("x", 0)),
                                      float(pa.get("y", 0)) - float(pb.get("y", 0)))
+            if is_ring and len(members) >= 3:
+                pa, pb = peaks[members[-1]], peaks[members[0]]
+                length += math.hypot(float(pa.get("x", 0)) - float(pb.get("x", 0)),
+                                     float(pa.get("y", 0)) - float(pb.get("y", 0)))
             len_frac = length / (LEN_FULL_WAVELENGTHS * median_wl)
             slot5 = float(_clip_bin(len_frac, N_LEN_BINS, 0.0, 1.0))
 

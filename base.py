@@ -18,8 +18,8 @@ Plus the B2 first-class Action lens (an eighth, non-homeostatic channel):
                node (OPAQUE exact-identity signature). Emitted for the
                previous step's action; its ONSET is pre-registered at
                execution time by the Pipeline (Binder.note_executed_action)
-               so SEQUENCE edges attribute effects to the action that
-               caused them. Vocabulary recovery for آ§5.3.4 replay reads
+               without creating a temporal edge. The exact action
+               identity remains available for replay. Vocabulary recovery for آ§5.3.4 replay reads
                the ConceptGraph action-alpha registry keyed by the lens's
                pattern nodes.
 
@@ -167,8 +167,8 @@ _LENS_NAMES: Tuple[str, ...] = (
 # (lenses.py, _emit), so adding entries here is the entire change.
 #
 # Self-audit: Position, Motion, Boundary, and Orientation are the same
-# class of field-tiling channel. Position feeds DEGREE/TOPOLOGY/CONTACT;
-# Motion feeds CO_MOTION; Boundary feeds Rule-2 family resolution;
+# class of field-tiling channel. Position supports spatial relations;
+# Motion contributes common-fate evidence to MATERIAL; Boundary feeds Rule-2 family resolution;
 # Orientation is cap-bound on every raw image (investigation آ§2). All
 # four are included here.
 _DEFAULT_LENS_DETECTION_CAP = 64  # unchanged; retains legacy semantics
@@ -368,11 +368,11 @@ def _segment_polyline(
         a_end = (k + 1) * seg_len if k < num_segs - 1 else total
         p_start = _point_at_arc(a_start)
         p_end = _point_at_arc(a_end)
-        dr = p_end[0] - p_start[0]
-        dc = p_end[1] - p_start[1]
-        if abs(dr) < 1e-9 and abs(dc) < 1e-9:
+        dx = p_end[0] - p_start[0]
+        dy = p_end[1] - p_start[1]
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
             continue
-        angle = math.atan2(dr, dc) % math.pi
+        angle = math.atan2(dy, dx) % math.pi
         mid = _point_at_arc((a_start + a_end) / 2.0)
         segments.append((angle, a_end - a_start, mid))
     return segments
@@ -902,18 +902,11 @@ class LensExecutor:
         """Construct the Action-lens Detection for `action` at step `t`,
         or None if the action is not lens-eligible.
 
-        Public because the Pipeline pre-registers the action pattern's
-        ONSET at execution time (end of step t, via
-        Binder.note_executed_action) so that SEQUENCE edges attribute the
-        effect patterns onsetting at t+1 to the action that caused them
-        (lag = 1). Emitting only at t+1 â€” when the lens observes
-        a_prev â€” would onset the action pattern in the SAME step as its
-        effects; SEQUENCE requires strictly positive lag, so the
-        actionâ†’effect edge could never form and the action would instead
-        be misattributed as the parent of the NEXT step's effects. The
-        pre-registration and this emission produce the identical pattern
-        key (lens name + OPAQUE signature hash of the exact action), so
-        the t+1 emission extends presence without re-onsetting.
+        The Pipeline pre-registers this exact action pattern at execution
+        time (end of step t, via Binder.note_executed_action), then the
+        Action lens emits the same signature at t+1. This preserves the
+        action's graph presence and vocabulary identity; it creates no
+        temporal edge.
 
         Deliberate divergence from _emit (آ§2.7 homeostasis): the Action
         lens is a categorical RECORD of the agent's own output, not a
@@ -2431,6 +2424,9 @@ class LensExecutor:
             serialize_tuple([serialize_int(8), serialize_value(u)]) for u in S_t.entity_indices
         } | {
             serialize_tuple([serialize_int(88), serialize_value(u)]) for u in S_t.entity_indices
+        } | {
+            _tb(a) for a in anchors
+            if isinstance(a, tuple) and len(a) == 4
         }
         state["M_prev"] = {k: v for k, v in state["M_prev"].items() if k in active_idents}
 
@@ -2520,7 +2516,12 @@ class LensExecutor:
             e_bin = int(math.floor(elong_norm * n_elong))
             if e_bin >= n_elong:
                 e_bin = n_elong - 1
-            anchor_bin = int(_anchor_class_bin(obs, u))
+            anchor_bin_raw = _anchor_class_bin(obs, u)
+            anchor_bin = (
+                int(anchor_bin_raw)
+                if math.isfinite(anchor_bin_raw) and anchor_bin_raw != ABSENT
+                else ABSENT
+            )
             responses.append(max(1.0 - elongation, EPSILON))
             anchors.append(u)
             pol_bins.append((theta_bin, e_bin, anchor_bin,
@@ -2720,9 +2721,7 @@ class PolarityLens:
             _field_simple = _f.get("simple")
 
         emitted = []
-        for anchor in sorted(anchor_positions.keys(),
-                             key=lambda a: (a if isinstance(a, int)
-                                            else str(a))):
+        for anchor in sorted(anchor_positions.keys(), key=serialize_value):
             g = None
             try:
                 g = observation.get_gabor_responses(anchor)

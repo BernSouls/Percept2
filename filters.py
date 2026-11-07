@@ -116,14 +116,15 @@ def compute_opponent_retinex(rgb_img: np.ndarray, extraction_scale: float = 5.0)
         rgb_float = rgb_img.astype(np.float64) / 255.0
     else:
         rgb_float = rgb_img.astype(np.float64)
+    rgb_float = np.clip(rgb_float, 0.0, None)
     lin = srgb_to_linear(rgb_float)
 
     xyz = np.tensordot(lin, M_srgb_to_xyz, axes=([2], [1]))
     lms = np.tensordot(xyz, M_xyz_to_lms, axes=([2], [1]))
 
-    log_L = np.log(lms[..., 0] + eps)
-    log_M = np.log(lms[..., 1] + eps)
-    log_S = np.log(lms[..., 2] + eps)
+    log_L = np.log(np.maximum(lms[..., 0], 0.0) + eps)
+    log_M = np.log(np.maximum(lms[..., 1], 0.0) + eps)
+    log_S = np.log(np.maximum(lms[..., 2], 0.0) + eps)
 
     sigma_fine = max(1.0, extraction_scale * P.COLOR_RETINEX_SIGMA_FINE_RATIO)
     sigma_coarse = max(2.0, sigma_fine * P.COLOR_RETINEX_SIGMA_COARSE_RATIO)
@@ -289,9 +290,9 @@ def _conv2d(img, kernel):
     non-comparable at the border. Pad manually first so both paths
     reflect-pad identically. Mirrors contour_field._convolve_same (FIX 3).
     """
-    if kernel.shape[0] <= P.FFT_KERNEL_THRESHOLD:
+    ph, pw = int(kernel.shape[0]) // 2, int(kernel.shape[1]) // 2
+    if max(kernel.shape) <= P.FFT_KERNEL_THRESHOLD or ph > img.shape[0] or pw > img.shape[1]:
         return nd_convolve(img, kernel, mode="reflect").astype(np.float32)
-    ph = pw = int(kernel.shape[0]) // 2
     padded = np.pad(img, ((ph, ph), (pw, pw)), mode="symmetric")
     return fftconvolve(padded, kernel, mode="valid").astype(np.float32)
 

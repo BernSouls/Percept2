@@ -188,33 +188,6 @@ from core.hashing import (  # noqa: F401
 
 # Undirected edge types get canonicalized as (min_id, max_id). Directed
 # types preserve their source→target ordering.
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
 
 
 # =============================================================================
@@ -235,37 +208,27 @@ def _map_family(
 ) -> Optional["ConceptFamily"]:
     """Map a candidate's accumulated detections and edges to a family.
 
-    v31 rule set (v30 §2.8.2 with §11.1/§11.2 removals, plus the flat
-    taxonomy's edge-based causal rule):
+    Active rules use the consolidated spatial-edge taxonomy:
 
-      Rule 1 — EVENT_CAUSAL / TEMPORAL_CHAIN:
-        A SEQUENCE edge (temporal priority: A precedes B) indicates a causal
-        family. sourceLayer decides which:
-          max(source_layer) == 0 → EVENT_CAUSAL
-          max(source_layer) >= 1 → TEMPORAL_CHAIN
+      Rule 1 — legacy causal-family compatibility:
+        EVENT_CAUSAL and TEMPORAL_CHAIN family labels remain in the graph
+        model, but no active EdgeType represents temporal priority. This
+        Binder therefore does not select either family from edge evidence.
 
       Rule 2 — SPATIAL_OBJECT:
         Two or more spatial lens types in the detection set.
 
       Rule 3 — RECURSIVE_COMPOSITION:
         A higher-layer detection (max(source_layer) >= 1) combined with a
-        heterogeneous edge set (>= 2 distinct relation channels). A
-        composition of compositions is recognized by its *mixed* relations
-        rather than by an order-2 edge: the STRUCTURAL_SIMILARITY edge type
-        was removed (§1.5/§4.12 — comparison is a measurement, not a
-        relation), so the rule now reads the relation structure directly.
-        Subgraphs already claimed by Rule 1 are excluded, so a causal chain
-        is never re-classified as a recursive composition.
+        heterogeneous set of at least two consolidated relation categories.
+        Structural similarity remains a measurement, not an edge category.
 
       Rule 4 — CROSS_DOMAIN_PATTERN:
         Same lens type, two or more distinct substrates.
 
-    [v31 FLAT-TAXONOMY NOTE] Under v31 the six concept-derived lenses
-    (ConceptSequence, ConceptStructure, Convergence, Divergence,
-    ConceptDegree, ConceptRhythm) have been removed. Causality is now
-    encoded as edge structure and read here. The v30 detection-only rule
-    fired on raw "Sequence" + "Structure" detections; those no longer
-    exist (they became the SEQUENCE binder), so the rule now fires on the corresponding edges.
+    Concept-derived sequence/structure lenses are not emitted. Spatial
+    relations use the eight canonical edge categories; co-motion and signed
+    anti-phase evidence are represented through MATERIAL, not temporal edges.
 
     Returns None if no rule matches; the candidate is a scaffold and MUST
     NOT be emitted as a CrossSection.
@@ -283,15 +246,9 @@ def _map_family(
     source_layers: Set[int] = {d.source_layer for d in original_detections}
     edge_types: Set[EdgeType] = {e[2] for e in edges}
 
-    # --- Rule 1: Causal families (edge-based in v31, re-based on SEQUENCE) ---
-    has_sequence_edge = EdgeType.SEQUENCE in edge_types
-    # [defect fix] This name was read at Rule 3 but never assigned, so the
-    # guard raised NameError the moment it was reached. Rule 1 returns on any
-    # SEQUENCE edge, so at Rule 3 the pair can never both hold and the guard
-    # is vacuously true for any predicate -- TOPOLOGY is the closest current
-    # analogue to the historical "structure" signal, but the intended
-    # predicate is UNVERIFIED. Behaviour is identical either way today.
-    has_struct_delta_edge = EdgeType.TOPOLOGY in edge_types
+    # Rule 1 is retained only for legacy diagnostics/ConceptFamily records;
+    # the canonical spatial EdgeType set has no SEQUENCE member.
+    has_sequence_edge = False
     if has_sequence_edge:
         if diag is not None:
             diag["map_family_rule1_fired"] = (
@@ -319,15 +276,9 @@ def _map_family(
 
     # --- Rule 3: RECURSIVE_COMPOSITION -----------------------------------
     # A composition of compositions: a higher-layer source (the subgraph
-    # contains a concept-derived detection, i.e. evidence that it is built
-    # out of already-composed structure) plus heterogeneous relation
-    # channels. Rule 1's causal pair is excluded so the two families stay
-    # disjoint and deterministic.
-    if (
-        max(source_layers, default=0) >= 1
-        and len(edge_types) >= 2
-        and not (has_sequence_edge and has_struct_delta_edge)
-    ):
+    # contains a concept-derived detection) plus heterogeneous canonical
+    # spatial relation channels.
+    if max(source_layers, default=0) >= 1 and len(edge_types) >= 2:
         if diag is not None:
             diag["map_family_rule3_fired"] = (
                 diag.get("map_family_rule3_fired", 0) + 1
@@ -451,6 +402,270 @@ def _edge_population(class_name: str,
             return ()
         out.append(soft_bump_bins(p, ax))
     return tuple(out)
+
+
+def _member_polyline_geometry(det: Detection, anchor_positions):
+    """Ordered member vertices with local tangent and signed turn.
+
+    PEAK_CHAIN is the primary contour spine.  Its pattern-node anchor is a
+    whole-chain centroid, which is not a local contour location; all geometry
+    here is therefore taken from the ordered member-peak anchors.
+    """
+    anchors = _extract_member_anchors(det)
+    pts = []
+    for anchor in anchors:
+        pos = anchor_positions.get(anchor) if anchor_positions else None
+        if pos is None or len(pos) < 2:
+            continue
+        x, y = float(pos[0]), float(pos[1])
+        if math.isfinite(x) and math.isfinite(y):
+            pts.append((anchor, (x, y)))
+    if len(pts) < 2:
+        return []
+
+    q = tuple(getattr(getattr(det, "sigma", None), "quantized", ()) or ())
+    closed = bool(len(q) > 3 and float(q[3]) >= 0.5)
+    out = []
+    n = len(pts)
+    for i, (anchor, point) in enumerate(pts):
+        if closed:
+            prev = pts[(i - 1) % n][1]
+            nxt = pts[(i + 1) % n][1]
+        else:
+            prev = pts[i - 1][1] if i > 0 else point
+            nxt = pts[i + 1][1] if i + 1 < n else point
+        dx, dy = nxt[0] - prev[0], nxt[1] - prev[1]
+        if math.hypot(dx, dy) <= 1e-9:
+            if i + 1 < n:
+                dx, dy = pts[i + 1][1][0] - point[0], pts[i + 1][1][1] - point[1]
+            elif i > 0:
+                dx, dy = point[0] - pts[i - 1][1][0], point[1] - pts[i - 1][1][1]
+        if math.hypot(dx, dy) <= 1e-9:
+            continue
+        theta = math.atan2(dy, dx) % math.pi
+        curvature = 0.0
+        if (closed or (0 < i < n - 1)):
+            ax, ay = point[0] - prev[0], point[1] - prev[1]
+            bx, by = nxt[0] - point[0], nxt[1] - point[1]
+            denom = math.hypot(ax, ay) * math.hypot(bx, by)
+            if denom > 1e-9:
+                turn = math.atan2(ax * by - ay * bx, ax * bx + ay * by)
+                curvature = max(-1.0, min(1.0, turn / math.pi))
+        out.append((anchor, point, theta, curvature, i))
+    return out
+
+
+def _nearest_polyline_vertex(point, det: Detection, anchor_positions):
+    """Nearest member peak and its local tangent/curvature at a point."""
+    geom = _member_polyline_geometry(det, anchor_positions)
+    if not geom or point is None:
+        return None
+    px, py = float(point[0]), float(point[1])
+    return min(
+        ((math.hypot(px - row[1][0], py - row[1][1]), row)
+         for row in geom),
+        key=lambda item: (item[0], item[1][4], serialize_value(item[1][0])),
+    )
+
+
+def _circle_fit_center(points):
+    """Algebraic circle center/radius; abstains on collinear/ill-conditioned points."""
+    if len(points) < 5:
+        return None
+    try:
+        import numpy as np
+        pts = np.asarray(points, dtype=np.float64)
+        x, y = pts[:, 0], pts[:, 1]
+        A = np.stack((x, y, np.ones_like(x)), axis=1)
+        rhs = -(x * x + y * y)
+        sol, *_ = np.linalg.lstsq(A, rhs, rcond=None)
+        cx, cy = -0.5 * float(sol[0]), -0.5 * float(sol[1])
+        r2 = cx * cx + cy * cy - float(sol[2])
+        if not math.isfinite(r2) or r2 <= 0.0:
+            return None
+        radius = math.sqrt(r2)
+        if not (math.isfinite(cx) and math.isfinite(cy) and math.isfinite(radius)):
+            return None
+        return cx, cy, radius
+    except Exception:
+        return None
+
+
+def _spiral_profile(det: Detection, anchor_positions, scale: float):
+    """Return a measured open-curve spiral profile, or None for a line/loop.
+
+    A least-squares circle fit is a poor centre estimator for an Archimedean
+    spiral: its radius changes with angle, so the fitted circle can shift away
+    from the true pole and halve the measured radial expansion.  Search a
+    bounded, deterministic grid over the member-point envelope and choose the
+    centre that best explains a monotone radius-versus-angle profile.
+    """
+    geom = _member_polyline_geometry(det, anchor_positions)
+    q = tuple(det.sigma.quantized)
+    if len(geom) < 8 or (len(q) > 3 and float(q[3]) >= 0.5):
+        return None
+    points = [row[1] for row in geom]
+    fitted = _circle_fit_center(points)
+    xs0 = [p[0] for p in points]
+    ys0 = [p[1] for p in points]
+    min_x, max_x = min(xs0), max(xs0)
+    min_y, max_y = min(ys0), max(ys0)
+    span_box = max(max_x - min_x, max_y - min_y, float(scale), 1.0)
+    pad = max(0.25 * float(scale), 0.08 * span_box)
+    grid_n = 24
+    step_x = (max_x - min_x + 2.0 * pad) / grid_n
+    step_y = (max_y - min_y + 2.0 * pad) / grid_n
+    centers = []
+    if fitted is not None:
+        centers.append((fitted[0], fitted[1]))
+    centers.append((sum(xs0) / len(xs0), sum(ys0) / len(ys0)))
+    for ix in range(grid_n + 1):
+        cx = min_x - pad + ix * step_x
+        for iy in range(grid_n + 1):
+            cy = min_y - pad + iy * step_y
+            centers.append((cx, cy))
+
+    def _profile_at(cx, cy):
+        radii = [math.hypot(x - cx, y - cy) for x, y in points]
+        if min(radii) <= 1e-6:
+            return None
+        angles = [math.atan2(y - cy, x - cx) for x, y in points]
+        unwrapped = [angles[0]]
+        for angle in angles[1:]:
+            delta = (angle - unwrapped[-1] + math.pi) % (2.0 * math.pi) - math.pi
+            unwrapped.append(unwrapped[-1] + delta)
+        angle_span = abs(unwrapped[-1] - unwrapped[0])
+        if angle_span < math.pi / 3.0:
+            return None
+        mean_phi = sum(unwrapped) / len(unwrapped)
+        mean_rad = sum(radii) / len(radii)
+        if mean_rad <= 1e-6:
+            return None
+        denom = sum((phi - mean_phi) ** 2 for phi in unwrapped)
+        if denom <= 1e-9:
+            return None
+        slope = sum((phi - mean_phi) * (rad - mean_rad)
+                    for phi, rad in zip(unwrapped, radii)) / denom
+        intercept = mean_rad - slope * mean_phi
+        residual = math.sqrt(sum(
+            (rad - (intercept + slope * phi)) ** 2
+            for phi, rad in zip(unwrapped, radii)
+        ) / len(radii)) / mean_rad
+        expansion = abs(slope) / mean_rad
+        direction = 1.0 if slope >= 0.0 else -1.0
+        signed_steps = []
+        for (phi_a, rad_a), (phi_b, rad_b) in zip(
+                zip(unwrapped, radii), zip(unwrapped[1:], radii[1:])):
+            dphi = phi_b - phi_a
+            dr = rad_b - rad_a
+            if abs(dphi) > 1e-6 and abs(dr) > 1e-6:
+                signed_steps.append(1 if (dr / dphi) * direction > 0.0 else 0)
+        monotonicity = (
+            sum(signed_steps) / len(signed_steps) if signed_steps else 0.0
+        )
+        score = expansion * monotonicity * math.exp(-min(residual, 20.0))
+        return (score, residual, expansion, angle_span, slope, mean_rad,
+                monotonicity, unwrapped)
+
+    best = None
+    best_center = None
+    for cx, cy in centers:
+        profile = _profile_at(cx, cy)
+        if profile is None:
+            continue
+        key = (profile[0], -profile[1], -cx, -cy)
+        if best is None or key > best:
+            best, best_center = key, (cx, cy, profile)
+    if best_center is None:
+        return None
+    cx, cy, profile = best_center
+    score, residual, expansion, span, slope, mean_r, monotonicity, unwrapped = profile
+    if mean_r > 100.0 * max(float(scale), 1.0) or mean_r < 0.2 * max(float(scale), 1.0):
+        return None
+
+    curvs = [row[3] for row in geom if abs(row[3]) > 0.015]
+    if len(curvs) < max(4, int(0.35 * len(geom))):
+        return None
+    signs = [1 if c > 0.0 else -1 for c in curvs]
+    sign_consistency = max(signs.count(1), signs.count(-1)) / len(signs)
+    if (sign_consistency < 0.72 or expansion <= 0.15
+            or monotonicity < 0.72 or residual > 0.35):
+        return None
+    pitch = math.atan(expansion)
+    return (cx, cy, mean_r, pitch, expansion,
+            1.0 if slope >= 0.0 else -1.0, sign_consistency)
+
+
+def _nearest_polyline_pair(a: Detection, b: Detection, anchor_positions):
+    """Nearest pair of member vertices with their local tangent geometry."""
+    ga = _member_polyline_geometry(a, anchor_positions)
+    gb = _member_polyline_geometry(b, anchor_positions)
+    if not ga or not gb:
+        return None
+    return min(
+        ((math.hypot(x[1][0] - y[1][0], x[1][1] - y[1][1]), x, y)
+         for x in ga for y in gb),
+        key=lambda row: (row[0], row[1][4], row[2][4],
+                         serialize_value(row[1][0]), serialize_value(row[2][0])),
+    )
+
+
+def _peak_chain_theta(det: Detection) -> Optional[float]:
+    """PEAK_CHAIN mean tangent uses 12 axial bins (not the V1 24-bin axis)."""
+    q = tuple(getattr(getattr(det, "sigma", None), "quantized", ()) or ())
+    if getattr(det, "k", None) == "PEAK_CHAIN" and len(q) >= 2:
+        return (float(q[1]) + 0.5) * math.pi / 12.0
+    if getattr(det, "k", None) == "Contour" and len(q) >= 2:
+        return (float(slot_value(det.sigma, "CONTOUR", "mean_theta", default=0.0)) + 0.5) * math.pi / P.ORIENTATION_N_THETA
+    return None
+
+
+def _surface_fragment_payload(det: Detection):
+    """Read non-identity fragment depth/material payload carried in rho."""
+    for role in getattr(det, "rho", ()) or ():
+        if len(role) >= 2 and role[0] == "surface_meta":
+            return role[1]
+    return ()
+
+
+def _fragment_material_delta(a, b) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """(chromatic, luminance, texture) differences between fragment groups."""
+    rows_a, rows_b = list(a or ()), list(b or ())
+
+    def _values(rows, index):
+        out = []
+        for row in rows:
+            if len(row) <= index or row[index] is None:
+                continue
+            value = float(row[index])
+            if math.isfinite(value):
+                out.append(value)
+        return out
+
+    def _mean(rows, index):
+        vals = _values(rows, index)
+        return (sum(vals) / len(vals)) if vals else None
+
+    hue_a, hue_b = _values(rows_a, 2), _values(rows_b, 2)
+    hue = None
+    if hue_a and hue_b:
+        def _circ_mean(values):
+            return math.atan2(sum(math.sin(v) for v in values),
+                              sum(math.cos(v) for v in values)) % (2.0 * math.pi)
+        dh = abs(_circ_mean(hue_a) - _circ_mean(hue_b)) % (2.0 * math.pi)
+        hue = min(dh, 2.0 * math.pi - dh) / math.pi
+    sat_a, sat_b = _mean(rows_a, 3), _mean(rows_b, 3)
+    chrom_candidates = [v for v in (hue, None if sat_a is None or sat_b is None
+                                     else abs(sat_a - sat_b)) if v is not None]
+    chrom = max(chrom_candidates) if chrom_candidates else None
+    lum_a, lum_b = _mean(rows_a, 1), _mean(rows_b, 1)
+    tex_a, tex_b = _mean(rows_a, 4), _mean(rows_b, 4)
+    lum = None if lum_a is None or lum_b is None else abs(lum_a - lum_b)
+    tex = None if tex_a is None or tex_b is None else abs(tex_a - tex_b)
+    return tuple(
+        None if value is None else max(0.0, min(1.0, float(value)))
+        for value in (chrom, lum, tex)
+    )
 
 
 def _contour_point_geometry(det, anchor_positions):
@@ -646,7 +861,7 @@ def _surface_normal(det: Detection) -> Optional[Tuple[float, float, float]]:
     if det.k != "Surface" or len(q) < 7:
         return None
     slant = (clamp(float(q[5]), 0.0, 7.0) / 7.0) * (math.pi / 2.0)
-    tilt = 0.0 if float(q[6]) < 0.5 else math.pi
+    tilt = 0.0 if float(q[6]) < 4.0 else math.pi
     nx = math.sin(slant) * math.cos(tilt)
     ny = math.sin(slant) * math.sin(tilt)
     nz = math.cos(slant)
@@ -689,52 +904,14 @@ class Binder:
     MAX_M_PREV_SIZE = 50_000
 
     ORDER_1_TYPES: Tuple[EdgeType, ...] = (
-        EdgeType.CO_ACTIVATION,
-        EdgeType.TRANSITION,
-        EdgeType.CO_MOTION,
-        EdgeType.CONTRAST,
-        EdgeType.PERIODICITY,
-        EdgeType.PERSISTENCE,
-        EdgeType.TOPOLOGY,
-        EdgeType.DEGREE,
-        EdgeType.CONTACT,
-        EdgeType.SEQUENCE,
-        EdgeType.SYNCHRONY,
-        EdgeType.ORIENTATION_CONTINUITY,
-        EdgeType.SURFACE_GROUPING,
-        EdgeType.CURVATURE,
+        EdgeType.PROXIMITY,
+        EdgeType.CONTINUITY,
+        EdgeType.CONTAINMENT,
         EdgeType.OCCLUSION,
-        EdgeType.CO_LOCATED,
-        EdgeType.ORIENTATION_BEND,
-        EdgeType.ORIENTATION_JUNCTION,
-        # [PHASE B] B.11: all six higher-tier types run as standard
-        # order-1 channels so emit_pending_edges can drive them.
-        EdgeType.CONTOUR_CONTINUITY,
-        EdgeType.JUNCTION_CONTOUR,
-        EdgeType.CURVE_CONTAINMENT,
-        EdgeType.PART_CONTAINMENT,
-        EdgeType.REGION_CONTENT,
-        EdgeType.CONTOUR_ORIENTATION,
-        EdgeType.JUNCTION_ORIENTATION,
-        # [Pass 12] Relational edge types E7–E11
-        EdgeType.AMODAL_LINK,
-        EdgeType.COCIRCULAR,
-        EdgeType.PARALLEL,
-        EdgeType.SYMMETRY,
-        EdgeType.BORDER_OWNERSHIP_EDGE,
-        EdgeType.CURVATURE_SIGN_CONTINUITY,
-        EdgeType.SHARED_BOUNDARY,
-        # [Pass 23] V4 non-Cartesian + chromatic/motion/3D relational edges
-        EdgeType.CONCENTRICITY,
-        EdgeType.TEXTURE_BOUNDARY_EDGE,
-        EdgeType.SURFACE_FOLD,
-        EdgeType.RADIALITY,
-        EdgeType.SPIRALITY,
-        EdgeType.COLOR_OPPONENT_BORDER,
-        EdgeType.MOTION_OPPOSITION,
-        EdgeType.CROSS_SCALE_IDENTITY,
-        EdgeType.BINOCULAR_DISPARITY,
-        EdgeType.LINE_TERMINATION,
+        EdgeType.JUNCTION,
+        EdgeType.SURFACE,
+        EdgeType.SHAPE,
+        EdgeType.MATERIAL,
     )
 
     def __init__(
@@ -750,20 +927,19 @@ class Binder:
         self.channels: Dict[EdgeType, Dict[str, Any]] = {
             et: _init_channel_state() for et in EdgeType
         }
-
-        # Per-pattern presence (global, across anchors).
-        # Pattern = (lens_type, signature_hash).
-        self._pattern_present_prev: Set[Tuple[str, bytes]] = set()
-        self._pattern_onset_now: Set[Tuple[str, bytes]] = set()
-        self._pattern_onset_prev: Set[Tuple[str, bytes]] = set()
-        self._pattern_last_onset: Dict[Tuple[str, bytes], int] = {}
-        self._pattern_history: Dict[Tuple[str, bytes], List[int]] = defaultdict(list)
-        self._pattern_last_seen: Dict[Tuple[str, bytes], int] = {}
-        self._pattern_anchors: Dict[Tuple[str, bytes], Set[Any]] = defaultdict(set)
-
-        # Per-anchor pattern-set change EMA (for Persistence).
-        self._anchor_pattern_set_prev: Dict[Any, FrozenSet[Tuple[str, bytes]]] = {}
-        self._anchor_change_ema: Dict[Any, float] = defaultdict(float)
+        # One channel update per outer step, regardless of how many tier
+        # sub-passes feed that category. Edges are still written immediately;
+        # these accumulators defer only homeostasis and M_prev commitment.
+        self._channel_step: Dict[EdgeType, Dict[str, Any]] = {
+            et: {"active": set(), "emitted": set(), "m_prev": {}, "last_seen": {}}
+            for et in EdgeType
+        }
+        # Current-step endpoint evidence. Category edges use confidence
+        # min(z_a, z_b), never the geometric competition signal.
+        self._node_z: Dict[int, float] = {}
+        self._node_position: Dict[int, Tuple[float, ...]] = {}
+        self._node_scale: Dict[int, float] = {}
+        self._node_signature: Dict[int, TypedSignature] = {}
 
         # [v8] Scene median nearest-neighbour distance, recomputed
         # once at the top of each Binder.step and read by spatial
@@ -804,63 +980,20 @@ class Binder:
         self._step_begin_called: bool = False
         self._lifecycle_owned: bool = False
         self._v1_present_this_step: Set[Tuple[str, bytes]] = set()
-        self._v1_onset_this_step: Set[Tuple[str, bytes]] = set()
         self._higher_dets_this_step: List[Detection] = []
         self._higher_node_ids: Dict[Detection, int] = {}
-        # [V9 Track 2 - B.26] The node -> anchor registry lives on the
-        # ConceptGraph (`cg._pattern_node_anchor` / `_pattern_node_
-        # position`), NOT here. Two reasons, both measured:
-        #   * reachability -- only this module holds a Binder; the
-        #     Subgraph construction sites live in Consolidator, Mapper,
-        #     Builder, PipelineSupport, StructuralSimilarity and
-        #     Prediction, all of which already hold a ConceptGraph. A
-        #     Binder-owned map would have to be threaded through 21 call
-        #     sites or read after the fact.
-        #   * lifetime -- a node's entry is pruned with the node
-        #     (_prune_pattern_nodes) and dies with the graph, so a reused
-        #     node id cannot inherit a stale anchor.
-        # It is CUMULATIVE by construction: cleared only with the graph.
-        # A per-step reset was tried and measured 0 entries at end of run
-        # -- i.e. empty exactly when the consumer reads it.
-        # The two methods below are the Binder-side accessors.
         self._higher_present_this_step: Set[Tuple[str, bytes]] = set()
-        self._higher_onset_this_step: Set[Tuple[str, bytes]] = set()
         self._step_anchor_positions: Optional[Dict[Any, Tuple[float, ...]]] = None
 
-        # Diagnostics.
-        #
-        # [SDRSEQ PROBE] `empty_or_zero_signal_by_type` closes the
-        # observability gap that made "SD/SEQ are zero" ambiguous. The
-        # three existing counters only partition candidates that actually
-        # REACHED `_process_channel`:
-        #     candidates_by_type        (entered)
-        #   - dropped_below_threshold   (failed the threshold test)
-        #   = emitted_by_type           (written to the graph)
-        # A channel whose upstream producer returned early, was never
-        # invoked, or was blocked by a precondition therefore reports
-        # 0 / 0 / 0 — indistinguishable from "emitted nothing because
-        # every candidate was rejected". This counter increments on steps
-        # where the channel had no candidate with positive signal at all,
-        # so `candidates_by_type == 0 AND empty_or_zero_signal_by_type > 0`
-        # positively identifies "nothing was ever produced" as opposed to
-        # "produced and then dropped".
         self.diagnostics: Dict[str, Any] = {
             "candidates_by_type": defaultdict(int),
             "emitted_by_type": defaultdict(int),
             "candidate_cap_hits": defaultdict(int),
             "dropped_below_threshold": defaultdict(int),
             "empty_or_zero_signal_by_type": defaultdict(int),
-            # [Q3] Anti-phase observability. The anti-phase channels once
-            # dropped every pair silently when either endpoint had no
-            # registered pattern node, which is indistinguishable from "no
-            # anti-phase structure exists". These three counters make the
-            # difference visible: offered (pairs the source produced),
-            # unresolved (an endpoint had no node to bind), candidates (what
-            # actually reached _process_channel).
             "anti_phase_pairs_offered": defaultdict(int),
             "anti_phase_unresolved_endpoints": defaultdict(int),
             "anti_phase_candidates": defaultdict(int),
-            "co_activation_steady_pairs_skipped": 0,
         }
 
     # -------------------------------------------------------------------------
@@ -887,39 +1020,101 @@ class Binder:
         self._step_begin_called = True
         self._lifecycle_owned = False
         self._v1_present_this_step = set()
-        self._v1_onset_this_step = set()
+        self._v1_dets_this_step = ()
+        self._v1_node_ids = {}
         self._higher_dets_this_step = []
         self._higher_node_ids = {}
         self._higher_present_this_step = set()
-        self._higher_onset_this_step = set()
         self._step_anchor_positions = None
+        self._channel_step = {
+            et: {"active": set(), "emitted": set(), "m_prev": {}, "last_seen": {}}
+            for et in EdgeType
+        }
+        self._node_z = {}
+        self._node_position = {}
+        self._node_scale = {}
+        self._node_signature = {}
 
     def finalize_step(self) -> None:
-        """Commit the per-step accumulators into the previous-step sets.
-
-        Runs after the whole step (Pipeline `finally`), so V1 patterns and any
-        higher-lens patterns registered by bind_intra_step land in ONE commit.
-        Keeping this out of step()'s tail is what lets mid-step registration
-        participate; that is the entire reason the lifecycle is bracketed.
-        """
+        """Commit one homeostatic update per category and close the step."""
         assert self._step_begin_called, (
             "finalize_step called without a matching note_step_begin"
         )
-        self._pattern_present_prev = (
-            self._v1_present_this_step | self._higher_present_this_step
-        )
-        self._pattern_onset_prev = (
-            self._v1_onset_this_step | self._higher_onset_this_step
-        )
+        for edge_type in EdgeType:
+            state = self.channels[edge_type]
+            acc = self._channel_step[edge_type]
+            active = len(acc["active"])
+            emitted = len(acc["emitted"])
+            rate = emitted / (active + EPSILON) if active else 0.0
+            state["r_bar"] = (
+                (1.0 - P.KAPPA_R_CHANNEL) * state["r_bar"]
+                + P.KAPPA_R_CHANNEL * rate
+            )
+            state["theta"] = clamp(
+                state["theta"]
+                + P.KAPPA_CHANNEL_THETA
+                * (state["r_bar"] - P.RHO_CHANNEL_TARGET),
+                P.THETA_CHANNEL_MIN,
+                P.THETA_CHANNEL_MAX,
+            )
+            had_emission = 1.0 if emitted > 0 else 0.0
+            state["C"] = (
+                (1.0 - P.KAPPA_C_CHANNEL) * state["C"]
+                + P.KAPPA_C_CHANNEL * had_emission
+            )
+            state["F"] = (
+                P.BETA_F_CHANNEL * state["F"]
+                + (1.0 - P.BETA_F_CHANNEL) * had_emission
+            )
+
+            # M_prev is committed only after every V1/V2/V4/LO-PIT pass has
+            # had a chance to contribute its candidate keys.
+            new_prev = dict(state["M_prev"])
+            last_seen = dict(state["last_seen"])
+            for key_b, value in acc["m_prev"].items():
+                new_prev[key_b] = int(bool(value))
+                last_seen[key_b] = int(self.t)
+            if len(new_prev) > self.MAX_M_PREV_SIZE:
+                to_drop = len(new_prev) - (self.MAX_M_PREV_SIZE // 2)
+                ordered = sorted(
+                    new_prev,
+                    key=lambda key: (last_seen.get(key, -1), key),
+                )
+                for key in ordered[:to_drop]:
+                    new_prev.pop(key, None)
+                    last_seen.pop(key, None)
+            state["M_prev"] = new_prev
+            state["last_seen"] = last_seen
+
         self._first_step = False
         self._v1_present_this_step = set()
-        self._v1_onset_this_step = set()
+        self._v1_dets_this_step = ()
+        self._v1_node_ids = {}
         self._higher_dets_this_step = []
         self._higher_node_ids = {}
         self._higher_present_this_step = set()
-        self._higher_onset_this_step = set()
         self._step_anchor_positions = None
+        self._node_z = {}
+        self._node_position = {}
+        self._node_scale = {}
+        self._node_signature = {}
         self._step_begin_called = False
+
+    def _register_detection(self, det: Detection, nid: int) -> None:
+        """Retain current-step endpoint evidence across all lens tiers."""
+        try:
+            z = float(det.z)
+        except (TypeError, ValueError):
+            z = 0.0
+        if not math.isfinite(z):
+            z = 0.0
+        z = clamp(z, 0.0, 1.0)
+        self._node_z[nid] = max(z, self._node_z.get(nid, 0.0))
+        self._node_scale[nid] = max(float(getattr(det, "scale", 0) or 0),
+                                    self._node_scale.get(nid, 0.0))
+        self._node_signature.setdefault(nid, det.sigma)
+        self._remember_node_anchor(nid, det.alpha)
+        self._remember_node_position(nid, det.alpha)
 
     def _remember_node_anchor(self, nid: int, anchor: Any) -> None:
         """[V9 Track 2 - B.26] Record which anchor a pattern node came from.
@@ -957,7 +1152,10 @@ class Binder:
             return
         p = pos.get(anchor)
         if p is not None:
-            self.cg.note_pattern_node_position(nid, p)
+            p_tuple = tuple(float(v) for v in p)
+            if all(math.isfinite(v) for v in p_tuple):
+                self._node_position.setdefault(nid, p_tuple)
+                self.cg.note_pattern_node_position(nid, p_tuple)
 
     # [V9 Track 2 - B.26] Positions are captured in a DELAYED PASS, not at
     # node-minting time. Both minting sites (:734 in bind_intra_step, :855
@@ -998,30 +1196,17 @@ class Binder:
                 d.k, sig_hash, signature=d.sigma
             )
             self._higher_node_ids[d] = node_id
-            self._remember_node_anchor(node_id, d.alpha)
-            # [V9 Track 2 - B.26] Nodes minted after step() returns: the
-            # step's position map is still live here (finalize_step clears
-            # it), so capture inline rather than in a later pass.
-            self._remember_node_position(node_id, d.alpha)
+            self._register_detection(d, node_id)
             self._higher_dets_this_step.append(d)
             self._higher_present_this_step.add(pat)
-            self._pattern_last_seen[pat] = t
-            self._pattern_anchors[pat].add(d.alpha)
-
-            prev_and_v1 = self._pattern_present_prev | self._v1_present_this_step
-            if pat not in prev_and_v1:
-                self._higher_onset_this_step.add(pat)
-                self._pattern_last_onset[pat] = t
-                self._pattern_onset_now.add(pat)  # extend for same-step readers
-
-            hist = self._pattern_history[pat]
-            hist.append(1)
-            if len(hist) > P.W_HISTORY:
-                hist.pop(0)
 
     def emit_pending_edges(self, level: str) -> None:
-        """Emit edges for one higher-lens level. Each channel is emitted
-        exactly once per step."""
+        """Emit one higher-lens sub-pass immediately into the graph.
+
+        Several emitters and levels may feed the same consolidated category;
+        category competition remains live while its homeostatic update and
+        M_prev commitment wait for finalize_step().
+        """
         assert self._step_begin_called, (
             "emit_pending_edges before note_step_begin"
         )
@@ -1055,8 +1240,15 @@ class Binder:
             # boundary, and closed-chain interior vs exterior. Without these
             # the coupling matrix is all-positive and the oscillator can
             # synchronise but never separate (diagnostics/_a6_maskfree_result).
-            self._run_anti_phase_border_ownership(dets_tuple, node_ids, pos)
-            self._run_anti_phase_containment(dets_tuple, node_ids, pos)
+            v1_dets = getattr(self, "_v1_dets_this_step", ())
+            v1_nids = getattr(self, "_v1_node_ids", {})
+            all_dets = (
+                tuple(sorted(set(v1_dets) | set(dets_tuple), key=_detection_sort_key))
+                if v1_dets else dets_tuple
+            )
+            all_node_ids = {**v1_nids, **node_ids} if v1_nids else node_ids
+            self._run_anti_phase_border_ownership(all_dets, all_node_ids, pos)
+            self._run_anti_phase_containment(all_dets, all_node_ids, pos)
             self._run_curvature_sign_continuity(dets_tuple, node_ids, pos)
             self._run_cocircular(dets_tuple, node_ids, pos)
             # [Pass 19] Emission ENABLED. The blocker was the inverted
@@ -1070,7 +1262,7 @@ class Binder:
             # [Pass 23] Mid-level (V1/V2) vocabulary: colour-opponent
             # borders, end-stopped line terminations, and cross-scale
             # correspondence.
-            self._run_color_opponent_border(dets_tuple, node_ids, pos)
+            self._run_color_opponent_border(all_dets, all_node_ids, pos)
             self._run_line_termination(dets_tuple, node_ids, pos)
             self._run_cross_scale_identity(dets_tuple, node_ids, pos)
         elif level == "v4":
@@ -1093,25 +1285,10 @@ class Binder:
             raise ValueError(f"emit_pending_edges: unknown level {level!r}")
 
     def clear_higher_accumulator(self) -> None:
-        """[V9 Track 2 - B.8] Clear the per-step higher-lens accumulators.
-
-        Deliberately UNCALLED by the live pipeline (single-pass per
-        observation): `note_step_begin` and `finalize_step` already bracket
-        these four fields, so the accumulator cannot go stale between steps
-        as written. This exists for the settle-loop integration seam, and
-        any caller must be gated on its own measurement -- calling it
-        MID-step, after the level loop but before `finalize_step`, drops
-        the same-step higher registrations from `_pattern_present_prev` /
-        `_pattern_onset_prev` and therefore changes cross-step
-        PERSISTENCE / TRANSITION behaviour.
-
-        Must NOT be called from inside `emit_pending_edges` (levels 2-4
-        would see an empty accumulator and never emit).
-        """
+        """Clear the per-step higher-lens accumulators."""
         self._higher_dets_this_step = []
         self._higher_node_ids = {}
         self._higher_present_this_step = set()
-        self._higher_onset_this_step = set()
 
     def step(
         self,
@@ -1145,9 +1322,9 @@ class Binder:
         )
         """Run all binders for step t. Writes edges into the concept graph.
 
-        anchor_positions and anchor_velocities are keyed by anchor. Spatial
-        binders (Topology, Degree, Contact, Co-motion) skip if the required
-        context is missing. See D6.
+        anchor_positions and anchor_velocities are keyed by anchor. Position-
+        and velocity-derived spatial emitters skip if their required context
+        is missing; co-motion is routed into MATERIAL. See D6.
         """
         # [PHASE B] B.3: the Pipeline brackets a step with note_step_begin()
         # and finalize_step(). Callers that drive Binder.step() directly
@@ -1188,39 +1365,26 @@ class Binder:
             for d in dets
         }
         for _d, _nid in node_ids.items():
-            self._remember_node_anchor(_nid, _d.alpha)
+            self._register_detection(_d, _nid)
+        # Bind this step's geometry before any emitter so canonical parameter
+        # encoding (and category-level relations) can read endpoint positions.
+        self._step_anchor_positions = anchor_positions
+        for _d, _nid in node_ids.items():
+            self._remember_node_position(_nid, _d.alpha)
 
-        self._update_pattern_history(dets)
-
-        # Order-1.
-        self._run_co_activation(dets, node_ids)
-        self._run_transition(dets, node_ids)
+        # Order-1 spatial channels (all 7 temporal channels deleted).
         self._run_co_motion(dets, node_ids, anchor_velocities)
-        # [Pass 23] MT motion opposition requires velocity data, so it is
-        # emitted from step() rather than the higher-lens level pass.
         self._run_motion_opposition(
             dets, node_ids, anchor_positions, anchor_velocities
         )
-        # [Pass 23] Depth separation is gated on genuinely 3D anchors; with
-        # flat (2D) positions it can never fire, so the gate is explicit.
-        # [ROUND 11 / O4] The z proxy is NOT a disparity measurement, so the
-        # channel is additionally BLOCKED behind an explicit opt-in flag; it
-        # cannot be produced from scene z unless an operator turns it on.
         if self._binocular_disparity_enabled(anchor_positions):
             self._run_binocular_disparity(
                 dets, node_ids, anchor_positions
             )
-        self._run_contrast(dets, node_ids)
-        self._run_periodicity(dets, node_ids)
-        self._run_persistence(dets, node_ids)
         self._run_topology(dets, node_ids, anchor_positions)
         self._run_degree(dets, node_ids, anchor_positions)
         self._run_contact(dets, node_ids, anchor_positions)
-        # [Stage 1.2] Bind surface patches to contour boundary entities
         self._run_stream_binding(dets, node_ids)
-
-        self._run_sequence(dets, node_ids)
-        self._run_synchrony(dets, node_ids)
         self._run_orientation_continuity(dets, node_ids, anchor_positions)
         self._run_surface_grouping(dets, node_ids, anchor_positions)
         self._run_curvature(dets, node_ids, anchor_positions)
@@ -1229,22 +1393,11 @@ class Binder:
         self._run_orientation_bend(dets, node_ids, anchor_positions)
         self._run_orientation_junction(dets, node_ids, anchor_positions)
 
-        # [PHASE B] B.3: V1 presence/onsets are staged, not committed. The
-        # commit is finalize_step()'s job so that higher-lens patterns
-        # registered later in the same step (bind_intra_step) join it.
         self._v1_present_this_step = {
             (d.k, _node_signature_hash(d.sigma)) for d in dets
         }
-        self._v1_onset_this_step = set(self._pattern_onset_now)
-        self._step_anchor_positions = anchor_positions
-
-        # [V9 Track 2 - B.26] Delayed position capture. Both minting sites
-        # ran earlier in this step, before `anchor_positions` was bound, so
-        # this pass is where the step's V1 nodes get their geometry. The
-        # pass is O(|dets|); first write wins, so re-visiting a node that
-        # was bound in an earlier step changes nothing.
-        for _d, _nid in node_ids.items():
-            self._remember_node_position(_nid, _d.alpha)
+        self._v1_dets_this_step = dets
+        self._v1_node_ids = dict(node_ids)
 
         if self._lifecycle_owned:
             # Self-managed step (no Pipeline bracket) — commit here so direct
@@ -1271,11 +1424,7 @@ class Binder:
         spatial-mesh lead asked for.
         """
         out: Dict[str, Dict[str, int]] = {}
-        for et in (
-            EdgeType.ORIENTATION_CONTINUITY,
-            EdgeType.ORIENTATION_BEND,
-            EdgeType.ORIENTATION_JUNCTION,
-        ):
+        for et in (EdgeType.CONTINUITY, EdgeType.JUNCTION):
             name = et.name
             out[name] = {
                 "offered": int(self.diagnostics["candidates_by_type"].get(name, 0)),
@@ -1327,46 +1476,13 @@ class Binder:
     # -------------------------------------------------------------------------
 
     def note_executed_action(self, t: int, det: Detection) -> int:
-        """Register the ONSET of an Action-lens pattern at the step the
-        action was EXECUTED (called by the Pipeline in Phase 9, after
-        env.execute_action).
-
-        Why: SEQUENCE edges require strictly positive lag (parent onset
-        before child onset). The effects of action a_t appear in the
-        observation at step t+1 — the same step the Action lens would
-        naturally emit a_t (as `prev_action`). Emission-time onset would
-        make action and effect co-onset (lag 0 ⇒ no edge) and instead
-        misattribute the NEXT step's effects to a_t. Pre-registering the
-        onset at execution time yields lag = 1 action→effect edges —
-        correct causal attribution — and consecutive actions still chain
-        (A(a_t) onset t → A(a_{t+1}) onset t+1) for §5.3.4 replay order.
-
-        Mechanics: creates/refreshes the pattern node, pins
-        _pattern_last_onset to t, and marks the pattern present-prev so
-        the lens emission at t+1 extends presence WITHOUT re-onsetting.
-        A repeated action re-executed at t+1 refreshes its onset (each
-        execution is a fresh causal event, keeping lag = 1 to its own
-        effects). Deterministic; O(1).
-        """
+        """Register an Action-lens pattern node at execution time."""
         sig_hash = _node_signature_hash(det.sigma)
         pat = (det.k, sig_hash)
         nid = self.cg.get_or_create_pattern_node(
             det.k, sig_hash, signature=det.sigma
         )
-        # [V9 Track 2 - B.26] Same delayed-window rule as bind_intra_step;
-        # no-op when the step's positions are already gone (None).
-        self._remember_node_position(nid, det.alpha)
-        self._pattern_last_onset[pat] = t
-        self._pattern_last_seen[pat] = t
-        # [PHASE B] Stage into the accumulator, NOT into _pattern_present_prev.
-        # Since Step 2 the previous-step sets are committed by finalize_step()
-        # at the end of the Pipeline step, which OVERWRITES
-        # _pattern_present_prev wholesale. Writing the pre-registration there
-        # directly would silently discard it, and the Action pattern would
-        # re-onset at t+1 (lag 0 => no SEQUENCE edge, effects misattributed to
-        # a_{t−1}). Staging it as V1 presence makes the commit carry it.
-        # The Action lens is a V1 lens, so _v1_present_this_step is the right
-        # bucket; it also makes bind_intra_step's duplicate guard correct.
+        self._register_detection(det, nid)
         self._v1_present_this_step.add(pat)
         return nid
 
@@ -1448,100 +1564,67 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """Contour-to-Contour proximity + orientation agreement.
+        """Bind nearby contour spines by nearest member peaks and local tangents.
 
-        Undirected, so candidate endpoints are canonicalized to (min, max)
-        before keying.
+        PEAK_CHAIN is primary. Contour remains an optional compatibility input,
+        but neither kind uses its whole-chain centroid for the pair geometry.
         """
         extraction_scale = self._step_extraction_scale
-        if extraction_scale <= 0.0:
+        if extraction_scale <= 0.0 or not anchor_positions:
             return
-        R = P.KAPPA_CONTOUR_CONTINUITY * extraction_scale
+        radius = P.KAPPA_CONTOUR_CONTINUITY * extraction_scale
         contour_dets = sorted(
-            [d for d in dets if d.k == "Contour"], key=_detection_sort_key
+            [d for d in dets if d.k in ("PEAK_CHAIN", "Contour")],
+            key=_detection_sort_key,
         )
-        det_pos: Dict[Detection, Optional[Tuple[float, ...]]] = {}
-        det_theta: Dict[Detection, float] = {}
-        for d in contour_dets:
-            if len(d.sigma.quantized) < 2:
-                det_pos[d] = None
-                continue
-            det_pos[d] = _mean_position(
-                _extract_member_anchors(d), anchor_positions
-            )
-            # [O2] The contour MEAN THETA, by name.
-            det_theta[d] = (
-                (slot_value(d.sigma, "CONTOUR", "mean_theta",
-                             default=0.0) + 0.5) * math.pi
-                / P.ORIENTATION_N_THETA
-            )
-
+        geometry = {
+            d: _member_polyline_geometry(d, anchor_positions)
+            for d in contour_dets
+        }
+        contour_dets = [d for d in contour_dets if geometry.get(d)]
         candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
         pairs_seen = 0
-        stop = False
-        for i in range(len(contour_dets)):
-            if stop:
-                break
-            a = contour_dets[i]
-            if det_pos[a] is None:
-                continue
+        for i, a in enumerate(contour_dets):
             u = node_ids[a]
-            for j in range(i + 1, len(contour_dets)):
-                b = contour_dets[j]
-                if det_pos[b] is None:
-                    continue
-                pairs_seen += 1
-                if pairs_seen > P.MAX_CONTOUR_PAIRS_PER_STEP:
-                    stop = True
-                    break
+            ga = geometry[a]
+            for b in contour_dets[i + 1:]:
                 v = node_ids[b]
                 if u == v:
                     continue
-                dist = _pos_dist(det_pos[a], det_pos[b])
-                delta = abs(det_theta[a] - det_theta[b])
-                # theta is a half-circle quantity: pi - delta folds the
-                # wrap-around without a modulo.
-                delta = min(delta, math.pi - delta)
-                signal = math.exp(-dist / R) * (1.0 - delta / math.pi)
-                src, dst = (u, v) if u < v else (v, u)
-                # [P2] THE NAMED WRITER. The parameters are the WRITER'S
-                # CONTINUOUS MEASUREMENTS in the slot's own unit (the
-                # separation in WAVELENGTHS, the signed turn in RADIANS, the
-                # curvature agreement as a FRACTION); the unit table
-                # (core.schema.EDGE_UNIT_TABLE) quantises them into the
-                # lookup bins and builds the graded population from the SAME
-                # numbers.  The old code addressed the slots by POSITION and
-                # binned by hand, which is how the third slot ended up
-                # carrying a chirality agreement under the name "curvature".
-                dist_w = dist / max(extraction_scale, 1e-6)
-                # [S5 contract] Signed turn binned in the lower->higher node ID
-                # frame: the edge key (src, dst) is ID-ordered while a, b come
-                # from detection sort order, so orient explicitly.
-                raw_delta = (
-                    det_theta[a] - det_theta[b]
-                    if u < v
-                    else det_theta[b] - det_theta[a]
+                nearest = _nearest_polyline_pair(a, b, anchor_positions)
+                if nearest is None:
+                    continue
+                dist, va, vb = nearest
+                if dist > radius:
+                    continue
+                pairs_seen += 1
+                if pairs_seen > P.MAX_CONTOUR_PAIRS_PER_STEP:
+                    break
+                turn_delta = _axial_wrap(va[2] - vb[2])
+                delta = abs(turn_delta)
+                signal = math.exp(-dist / max(radius, 1e-6)) * max(
+                    0.0, 1.0 - delta / (math.pi / 2.0)
                 )
-                turn = (raw_delta + math.pi / 2.0) % math.pi - math.pi / 2.0
-                # Curvature agreement from the Contour summary chirality slot.
-                # [F3] The chirality is CONTOUR slot 6; slot 4 is the
-                # total turn (the binder was reading the wrong slot).
-                # [O2] The contour CHIRALITY, by name (slot 6 of
-                # CONTOUR; slot 4 is the total turn).
-                chir_a = slot_value(a.sigma, "CONTOUR", "chirality",
-                                   default=4.0)
-                chir_b = slot_value(b.sigma, "CONTOUR", "chirality",
-                                   default=4.0)
-                curv_agree = max(0.0, min(1.0, 1.0 - abs(chir_a - chir_b) / 8.0))
+                if signal <= 0.0:
+                    continue
+                src, dst = (u, v) if u < v else (v, u)
+                turn = turn_delta if u < v else -turn_delta
+                curvature_agree = max(
+                    0.0, min(1.0, 1.0 - abs(va[3] - vb[3]) / 2.0)
+                )
+                gap = dist / max(extraction_scale, 1e-6)
                 ep = _edge_params(
                     "EDGE_CONTOUR_CONTINUITY",
-                    {"dist": dist_w, "turn": turn, "curv_agree": curv_agree},
+                    {"dist": gap, "turn": turn,
+                     "curv_agree": curvature_agree},
                     sign=1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
+            if pairs_seen > P.MAX_CONTOUR_PAIRS_PER_STEP:
+                break
 
-        self._process_channel(EdgeType.CONTOUR_CONTINUITY, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_junction_contour(
         self,
@@ -1549,83 +1632,76 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """Junction-to-Contour proximity. Directed (hub -> contour)."""
+        """Connect junctions to incident contour spines using local vertices."""
         extraction_scale = self._step_extraction_scale
-        if extraction_scale <= 0.0:
+        if extraction_scale <= 0.0 or not anchor_positions:
             return
-        R = P.KAPPA_JUNCTION_CONTOUR * extraction_scale
+        radius = P.KAPPA_JUNCTION_CONTOUR * extraction_scale
         junction_dets = sorted(
             [d for d in dets if is_junction_kind(d.k)],
-            key=_detection_sort_key
+            key=_detection_sort_key,
         )
         contour_dets = sorted(
-            [d for d in dets if d.k == "Contour"], key=_detection_sort_key
+            [d for d in dets if d.k in ("PEAK_CHAIN", "Contour")],
+            key=_detection_sort_key,
         )
-
-        det_pos: Dict[Detection, Optional[Tuple[float, ...]]] = {}
-        for d in junction_dets + contour_dets:
-            det_pos[d] = _mean_position(
-                _extract_member_anchors(d), anchor_positions
-            )
-
+        contour_geom = {
+            d: _member_polyline_geometry(d, anchor_positions)
+            for d in contour_dets
+        }
         candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
         pairs_seen = 0
-        stop = False
-        for j in junction_dets:
-            if stop:
-                break
-            if det_pos[j] is None:
+        for junction in junction_dets:
+            jnid = node_ids.get(junction)
+            if jnid is None:
                 continue
-            u = node_ids[j]
-            for c in contour_dets:
-                if det_pos[c] is None:
+            jpos = anchor_positions.get(junction.alpha)
+            if jpos is None:
+                jpos = _mean_position(_extract_member_anchors(junction), anchor_positions)
+            if jpos is None:
+                continue
+            qj = tuple(junction.sigma.quantized)
+            topo = float(slot_value(junction.sigma, "JUNCTION", "topo",
+                                    default=float(qj[2]) if len(qj) > 2 else 0.0))
+            arm_count = max(2, len(_extract_member_anchors(junction)))
+            for contour in contour_dets:
+                cnid = node_ids.get(contour)
+                geom = contour_geom.get(contour, ())
+                if cnid is None or cnid == jnid or not geom:
+                    continue
+                nearest = _nearest_polyline_vertex(jpos, contour, anchor_positions)
+                if nearest is None:
+                    continue
+                dist, vertex = nearest
+                if dist > radius:
                     continue
                 pairs_seen += 1
                 if pairs_seen > P.MAX_JUNCTION_CONTOUR_PAIRS:
-                    stop = True
                     break
-                v = node_ids[c]
-                if u == v:
-                    continue
-                dist = _pos_dist(det_pos[j], det_pos[c])
-                signal = 1.0 / (1.0 + dist / R)
-                # [Pass 22] Incidence angle: the chord from the junction to
-                # the contour versus the contour's own dominant tangent. High
-                # incidence means a T-stem (occlusion evidence); low incidence
-                # means a continuation arm. det_theta does not exist in this
-                # method, so the tangent is read from the contour signature
-                # slot 1 exactly as _run_contour_continuity does.
                 chord_theta = math.atan2(
-                    det_pos[c][1] - det_pos[j][1],
-                    det_pos[c][0] - det_pos[j][0]
+                    vertex[1][1] - float(jpos[1]),
+                    vertex[1][0] - float(jpos[0]),
                 ) % math.pi
-                # [O2] The contour MEAN THETA, by name.
-                contour_theta = (
-                    (slot_value(c.sigma, "CONTOUR", "mean_theta",
-                                 default=0.0) + 0.5) * math.pi
-                    / P.ORIENTATION_N_THETA
-                    if len(c.sigma.quantized) > 1 else 0.0
+                angle_delta = abs(_axial_wrap(chord_theta - vertex[2]))
+                signal = math.exp(-dist / max(radius, 1e-6)) * max(
+                    0.0, 1.0 - angle_delta / (math.pi / 2.0)
                 )
-                incidence = abs(chord_theta - contour_theta)
-                incidence = min(incidence, math.pi - incidence)
-                # Topology class straight from the Junction signature.
-                # [O2] The junction TOPOLOGY CLASS, by name.
-                topo_val = slot_value(j.sigma, "JUNCTION", "topo",
-                                        default=3.0)
-                # [P2] THE NAMED WRITER: the separation in WAVELENGTHS, the
-                # INCIDENCE ANGLE in RADIANS (axial) and the junction's
-                # TOPOLOGY CLASS as a categorical lookup key.
-                dist_w = dist / max(extraction_scale, 1e-6)
+                if signal <= 0.0:
+                    continue
                 ep = _edge_params(
                     "EDGE_JUNCTION_CONTOUR",
-                    {"dist": dist_w, "incidence": incidence,
-                     "topology_class": float(min(6, max(0, int(round(topo_val)))))},
+                    {"dist": dist / max(extraction_scale, 1e-6),
+                     "incidence": angle_delta,
+                     "topology_class": float(min(6, max(0, int(round(topo))))),
+                     "arm_count": float(arm_count)},
                     sign=1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
-                candidates.append((u, v, signal, (u, v), ep))
+                candidates.append((jnid, cnid, signal, (jnid, cnid), ep))
+            if pairs_seen > P.MAX_JUNCTION_CONTOUR_PAIRS:
+                break
 
-        self._process_channel(EdgeType.JUNCTION_CONTOUR, candidates)
+        self._process_channel(EdgeType.JUNCTION, candidates)
 
     def _run_contour_orientation(
         self,
@@ -1653,7 +1729,7 @@ class Binder:
                 )
                 candidates.append((u, member_nid, 1.0, (u, member_nid), ep))
         candidates.extend(self._run_peak_chain_orientation(dets, node_ids))
-        self._process_channel(EdgeType.CONTOUR_ORIENTATION, candidates)
+        self._process_channel(EdgeType.CONTAINMENT, candidates)
 
     def _run_peak_chain_orientation(
         self,
@@ -1730,7 +1806,7 @@ class Binder:
                     confidence=1.0,
                 )
                 candidates.append((u, member_nid, 1.0, (u, member_nid), ep))
-        self._process_channel(EdgeType.JUNCTION_ORIENTATION, candidates)
+        self._process_channel(EdgeType.JUNCTION, candidates)
 
     @staticmethod
     def _containment_geometry(
@@ -1876,7 +1952,7 @@ class Binder:
                     confidence=1.0,
                 )
                 candidates.append((u, member_nid, 1.0, (u, member_nid), ep))
-        self._process_channel(EdgeType.CURVE_CONTAINMENT, candidates)
+        self._process_channel(EdgeType.CONTAINMENT, candidates)
 
     def _run_part_containment(
         self,
@@ -1956,18 +2032,18 @@ class Binder:
                 )
                 candidates.append((c_nid, p_nid, signal, (c_nid, p_nid), ep))
 
-        self._process_channel(EdgeType.PART_CONTAINMENT, candidates)
+        self._process_channel(EdgeType.CONTAINMENT, candidates)
 
     def _run_part_content(
         self,
         dets: Tuple[Detection, ...],
         node_ids: Dict[Detection, int],
     ) -> None:
-        """Membership: RegionShape <-> content nodes inside it. Undirected.
+        """Directed membership: enclosing RegionShape -> contained content.
 
-        A content node (Color, Surface, Texture) is "inside" a RegionShape
-        when they share the same anchor (entity). This is a geometric
-        enclosure test based on shared entity identity, not a lens extraction.
+        A content node (Color, Surface, Texture) is inside a RegionShape when
+        they share the same anchor (entity). This is an enclosure relation,
+        not an undirected association.
         """
         # Collect RegionShape detections
         region_shapes = {}
@@ -1991,8 +2067,8 @@ class Binder:
             v = node_ids[d]
             if u == v:
                 continue
-            # Undirected: canonicalize to (min, max)
-            src, dst = (u, v) if u < v else (v, u)
+            # CONTAINMENT is directed: enclosing region -> contained content.
+            src, dst = u, v
             # [P2] THE NAMED WRITER: the membership is a 0/1 FLAG.
             ep = _edge_params(
                 "EDGE_REGION_CONTENT",
@@ -2002,7 +2078,7 @@ class Binder:
             )
             candidates.append((src, dst, 1.0, (src, dst), ep))
 
-        self._process_channel(EdgeType.REGION_CONTENT, candidates)
+        self._process_channel(EdgeType.CONTAINMENT, candidates)
 
     def _run_parallel(
         self,
@@ -2100,7 +2176,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-        self._process_channel(EdgeType.PARALLEL, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_border_ownership_edge(
         self,
@@ -2211,7 +2287,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((u, v, signal, (u, v), ep))
-        self._process_channel(EdgeType.BORDER_OWNERSHIP_EDGE, candidates)
+        self._process_channel(EdgeType.OCCLUSION, candidates)
 
     def _run_anti_phase_border_ownership(
         self,
@@ -2227,11 +2303,9 @@ class Binder:
         slot (perception/ownership.py) says which of the two is the figure, so
         the pair is emitted figure -> ground: the figure side owns the border
         and the ground side sits behind it, which separates them rather than
-        binding them. Positive EDGE_BORDER_OWNERSHIP edges (entity -> the
-        region it faces) are emitted by `_run_border_ownership_edge`; this
-        channel is the complement and carries sign=-1 on OCCLUSION. OCCLUSION
-        is a DIRECTED type, so the figure->ground order is preserved and the
-        edge is near (figure) -> far (ground).
+        binding them. Positive containment/ownership edges are emitted by
+        their own readers; this complementary repulsion is routed to signed
+        MATERIAL so OCCLUSION remains positive and directed near -> far.
         """
         if not bool(P.ANTIPHASE_ENABLED):
             return
@@ -2256,25 +2330,14 @@ class Binder:
             u, v = anchor_nid.get(a), anchor_nid.get(b)
             if u is None or v is None:
                 self.diagnostics["anti_phase_unresolved_endpoints"][
-                    EdgeType.BORDER_OWNERSHIP_EDGE.name] += 1
+                    EdgeType.MATERIAL.name] += 1
                 continue
             if u == v:
                 continue
             a_id, b_id = u, v            # directed: figure -> ground
-            # [Q3] Emitted on OCCLUSION, not on BORDER_OWNERSHIP_EDGE: the
-            # positive border-ownership channel already writes that type for
-            # the same node pairs, and one concept-graph edge per
-            # (src, dst, type) key means the two emitters would overwrite
-            # each other (observed: 11 anti-phase candidates, 3 edges left in
-            # the store, 2 of them clobbered). The occlusion payload is the
-            # schema's (depth, stack_depth, source).
-            # [P2] MIS-READ FIX: the depth slot is a LAYER COUNT (the gap
-            # between the occluder and the occluded).  The anti-phase claim
-            # measures a claim STRENGTH, not a rank gap, so writing the
-            # strength there was a category error (a fraction in [0, 1] read
-            # as a layer count).  The claim says the two are ADJACENT in
-            # depth (depth = 0) and its strength travels in the edge's
-            # CONFIDENCE, where it belongs.
+            # The signed separation candidate is routed by _process_channel
+            # from the temporary OCCLUSION writer into MATERIAL. It carries no
+            # ordinal-depth measurement; OCCLUSION itself remains sign=+1.
             ep = _edge_params(
                 "EDGE_OCCLUSION",
                 {"depth": 0.0, "stack_depth": 8.0, "source": 0.0,
@@ -2284,9 +2347,9 @@ class Binder:
             )
             candidates.append((a_id, b_id, strength, (a_id, b_id), ep))
         self.diagnostics["anti_phase_pairs_offered"][
-            EdgeType.OCCLUSION.name] += len(pairs)
+            EdgeType.MATERIAL.name] += len(pairs)
         self.diagnostics["anti_phase_candidates"][
-            EdgeType.OCCLUSION.name] += len(candidates)
+            EdgeType.MATERIAL.name] += len(candidates)
         self._process_channel(EdgeType.OCCLUSION, candidates)
 
     @staticmethod
@@ -2311,8 +2374,8 @@ class Binder:
         A PEAK_CHAIN whose closure slot is set is one surface's silhouette.
         Every other detection whose anchor falls strictly inside its member
         ring sits behind it on another depth layer, so the ring (exterior)
-        and the interior are separated, not bound. Emitted as sign=-1 with
-        confidence = containment depth (centre = 1, boundary -> 0).
+        and the interior are separated, not bound. The signed candidate is
+        routed to MATERIAL with confidence equal to measured containment depth.
         """
         if not bool(P.ANTIPHASE_ENABLED):
             return
@@ -2340,23 +2403,15 @@ class Binder:
             u, v = anchor_nid.get(ring_anchor), anchor_nid.get(inner_anchor)
             if u is None or v is None:
                 self.diagnostics["anti_phase_unresolved_endpoints"][
-                    EdgeType.OCCLUSION.name] += 1
+                    EdgeType.MATERIAL.name] += 1
                 continue
             if u == v:
                 continue
             if depth < float(P.ANTIPHASE_MIN_CONFIDENCE):
                 continue
-            a_id, b_id = (u, v) if u < v else (v, u)
-            # [Q3] OCCLUSION again (see the border-ownership channel): a ring
-            # and its interior are an occlusion pair, the positive
-            # PART_CONTAINMENT emitter already owns that type, and one edge
-            # per key means the two would clobber each other. source = 1
-            # (depth / containment) distinguishes this source from the
-            # boundary one.
-            # [P2] MIS-READ FIX: the depth slot is a LAYER COUNT; the
-            # containment claim measures a DEPTH (a containment fraction),
-            # so the claim's strength travels in the CONFIDENCE and the depth
-            # reads as the adjacent layer (0).
+            a_id, b_id = u, v            # directed: enclosing ring (near) -> interior (far)
+            # The signed separation is a MATERIAL relation; do not encode
+            # containment fraction as an ordinal OCCLUSION depth.
             ep = _edge_params(
                 "EDGE_OCCLUSION",
                 {"depth": 0.0, "stack_depth": 8.0, "source": 1.0,
@@ -2366,9 +2421,9 @@ class Binder:
             )
             candidates.append((a_id, b_id, depth, (a_id, b_id), ep))
         self.diagnostics["anti_phase_pairs_offered"][
-            EdgeType.OCCLUSION.name] += len(pairs)
+            EdgeType.MATERIAL.name] += len(pairs)
         self.diagnostics["anti_phase_candidates"][
-            EdgeType.OCCLUSION.name] += len(candidates)
+            EdgeType.MATERIAL.name] += len(candidates)
         self._process_channel(EdgeType.OCCLUSION, candidates)
 
     def _run_curvature_sign_continuity(
@@ -2396,7 +2451,7 @@ class Binder:
                 continue
             u = node_ids[a]
             q_a = a.sigma.quantized
-            chir_a = (q_a[6] - 4.0) if len(q_a) > 6 else 0.0
+            chir_a = (q_a[6] - 4.0) / 4.0 if len(q_a) > 6 else 0.0
             for j in range(i + 1, len(contour_dets)):
                 b = contour_dets[j]
                 pb = anchor_positions.get(b.alpha)
@@ -2412,11 +2467,11 @@ class Binder:
                 if dist > 2.0 * R:
                     continue
                 q_b = b.sigma.quantized
-                chir_b = (q_b[6] - 4.0) if len(q_b) > 6 else 0.0
-                same_sign = (chir_a * chir_b > 0.0) or (abs(chir_a) < 0.5 and abs(chir_b) < 0.5)
+                chir_b = (q_b[6] - 4.0) / 4.0 if len(q_b) > 6 else 0.0
+                same_sign = (chir_a * chir_b > 0.0) or (abs(chir_a) < 0.125 and abs(chir_b) < 0.125)
                 if not same_sign:
                     continue
-                signal = math.exp(-dist / R) * (1.0 - abs(chir_a - chir_b) / 8.0)
+                signal = math.exp(-dist / R) * (1.0 - abs(chir_a - chir_b) / 2.0)
                 if signal <= 0.0:
                     continue
                 # [P2] THE NAMED WRITER: the difference of the two contours'
@@ -2432,7 +2487,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-        self._process_channel(EdgeType.CURVATURE_SIGN_CONTINUITY, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_cocircular(
         self,
@@ -2514,7 +2569,7 @@ class Binder:
                 candidates.append((src, dst, signal, (src, dst), ep))
             if stop:
                 break
-        self._process_channel(EdgeType.COCIRCULAR, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_symmetry(
         self,
@@ -2569,7 +2624,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-        self._process_channel(EdgeType.SYMMETRY, candidates)
+        self._process_channel(EdgeType.SHAPE, candidates)
 
     def _run_amodal_link(
         self,
@@ -2655,7 +2710,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-        self._process_channel(EdgeType.AMODAL_LINK, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_shared_boundary(
         self,
@@ -2720,7 +2775,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-        self._process_channel(EdgeType.SHARED_BOUNDARY, candidates)
+        self._process_channel(EdgeType.SURFACE, candidates)
 
     # ======================================================================
     # [Pass 23 round 2a] V4 non-Cartesian + surface relational edges
@@ -2746,87 +2801,84 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """V4 concentric: nested contours sharing a polar origin.
-
-        Directed: inner -> outer.
-        """
+        """Nested, closed/enclosing contours sharing a genuine centre."""
         if not anchor_positions:
             return
-        r_scale = max(self._step_extraction_scale, 1.0)
-
         contour_info = []
         for d in dets:
-            if d.k not in ("Contour", "CurveComplex"):
+            if d.k not in ("PEAK_CHAIN", "Contour", "CurveComplex"):
                 continue
-            pos = anchor_positions.get(d.alpha)
-            if pos is None:
+            q = tuple(d.sigma.quantized)
+            # Slot 3 is closure for PEAK_CHAIN/Contour/CurveComplex.  Do not
+            # interpret angular spread of an open line as a closed boundary.
+            if len(q) < 4 or float(q[3]) < 0.5:
                 continue
             nid = node_ids.get(d)
             if nid is None:
                 continue
+            anchors = _extract_member_anchors(d)
+            pts = []
+            for a in anchors:
+                p = anchor_positions.get(a)
+                if p is not None and len(p) >= 2:
+                    pts.append((float(p[0]), float(p[1])))
+            if len(pts) < 5:
+                continue
             geom = _contour_point_geometry(d, anchor_positions)
             if geom is None:
                 continue
-            r, ang_ext, ecc = geom
-            contour_info.append((d, pos, r, ang_ext, ecc, nid))
+            radius, eccentricity, angular_extent = geom
+            # An almost-collinear cloud does not enclose an interior.
+            if eccentricity >= 0.92 or angular_extent < 0.55:
+                continue
+            center = (
+                sum(p[0] for p in pts) / len(pts),
+                sum(p[1] for p in pts) / len(pts),
+            )
+            contour_info.append((d, center, radius, angular_extent,
+                                 eccentricity, nid))
 
         if len(contour_info) < 2:
             return
-
         candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
-        for i in range(len(contour_info)):
-            d_a, pos_a, r_a, ext_a, ecc_a, nid_a = contour_info[i]
-            for j in range(i + 1, len(contour_info)):
-                d_b, pos_b, r_b, ext_b, ecc_b, nid_b = contour_info[j]
+        for i, (d_a, c_a, r_a, ext_a, ecc_a, nid_a) in enumerate(contour_info):
+            for d_b, c_b, r_b, ext_b, ecc_b, nid_b in contour_info[i + 1:]:
                 if nid_a == nid_b:
                     continue
-
-                dist = _pos_dist(pos_a, pos_b)
+                dist = _pos_dist(c_a, c_b)
                 r_outer = max(r_a, r_b)
                 r_inner = min(r_a, r_b)
-                if dist > 1.5 * r_outer:
+                if r_outer <= 1e-6 or r_inner <= 1e-6:
                     continue
-
-                ratio = r_outer / max(r_inner, 1e-6)
+                # True common-origin test: the centers must lie within 35% of
+                # the outer contour radius, not merely somewhere inside it.
+                if dist > 0.35 * r_outer:
+                    continue
+                ratio = r_outer / r_inner
                 if ratio < 1.15 or ratio > 10.0:
                     continue
-
-                log_ratio = math.log2(max(ratio, 1.0))
-                radial_bin = float(clamp(int(round(log_ratio * 2.0)), 0, 7))
-
-                norm_offset = dist / max(r_outer, 1e-6)
-                offset_bin = float(clamp(int(round(norm_offset * 7.0)), 0, 7))
-
+                log_ratio = math.log2(ratio)
                 min_extent = min(ext_a, ext_b)
-                extent_bin = float(clamp(int(round(min_extent * 7.0)), 0, 7))
-
                 ecc_diff = abs(ecc_a - ecc_b)
-                ecc_agree_bin = float(clamp(int(round(ecc_diff * 7.0)), 0, 7))
-
-                offset_penalty = math.exp(-3.0 * norm_offset)
-                signal = offset_penalty * min_extent * (1.0 - ecc_diff)
+                signal = (
+                    math.exp(-4.0 * dist / r_outer)
+                    * min_extent
+                    * max(0.0, 1.0 - ecc_diff)
+                )
                 if signal <= 0.01:
                     continue
-
-                # Directed: inner -> outer
-                if r_a < r_b:
-                    src, dst = nid_a, nid_b
-                else:
-                    src, dst = nid_b, nid_a
-
-                # [P2] THE NAMED WRITER: the RADIAL RATIO as a log2
-                # ratio, the NORMALISED OFFSET and the MINIMUM EXTENT as
-                # fractions, and the ECCENTRICITY DIFFERENCE as a fraction.
+                src, dst = ((nid_a, nid_b) if r_a < r_b else (nid_b, nid_a))
                 ep = _edge_params(
                     "EDGE_CONCENTRICITY",
-                    {"radial_ratio": log_ratio, "offset": norm_offset,
-                     "extent": min_extent, "ecc_difference": ecc_diff},
+                    {"radial_ratio": ratio,
+                     "offset": dist / r_outer,
+                     "extent": min_extent,
+                     "ecc_difference": ecc_diff},
                     sign=1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-
-        self._process_channel(EdgeType.CONCENTRICITY, candidates)
+        self._process_channel(EdgeType.SHAPE, candidates)
 
     # __P23_TEXTURE_BOUNDARY_ANCHOR__
 
@@ -2927,7 +2979,7 @@ class Binder:
                 )
                 candidates.append((src, dst, salience, (src, dst), ep))
 
-        self._process_channel(EdgeType.TEXTURE_BOUNDARY_EDGE, candidates)
+        self._process_channel(EdgeType.MATERIAL, candidates)
 
     # __P23_SURFACE_FOLD_ANCHOR__
 
@@ -2937,105 +2989,158 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """V4/CIP surface fold: dihedral angle between oriented surfaces.
-
-        Directed: convex side -> concave side. Normal comes from the
-        coarse two-tilt SURFACE_PATCH cue: dihedral is a proxy, not a
-        measured fold angle; magnitude gate + sharpness carry the evidence.
-        """
+        """Bind measured SurfaceFragment normals, depth order and material."""
         if not anchor_positions:
             return
         r_scale = max(self._step_extraction_scale, 1.0)
 
-        surf_info = []
+        fragments = []
+        for d in dets:
+            if d.k != "SurfaceFragment":
+                continue
+            q = tuple(d.sigma.quantized)
+            pos = anchor_positions.get(d.alpha)
+            nid = node_ids.get(d)
+            if pos is None or nid is None:
+                continue
+            normal = slant = None
+            if (d.sigma.relation == "SURFACE_FRAGMENT_ORIENTATION"
+                    and len(q) >= 4):
+                slant = (float(q[0]) + 0.5) * (math.pi / 2.0) / 8.0
+                tilt = (float(q[1]) + 0.5) * (2.0 * math.pi / 12.0)
+                normal = (
+                    math.sin(slant) * math.cos(tilt),
+                    math.sin(slant) * math.sin(tilt),
+                    math.cos(slant),
+                )
+            try:
+                conf = clamp(float(d.z), 0.0, 1.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            fragments.append((
+                d, nid, pos, normal, slant, conf,
+                _surface_fragment_payload(d),
+            ))
+
+        surface_candidates: List[Tuple[int, int, float, Tuple[Any, ...], EdgeParams]] = []
+        occlusion_candidates: List[Tuple[int, int, float, Tuple[Any, ...], EdgeParams]] = []
+        material_candidates: List[Tuple[int, int, float, Tuple[Any, ...], EdgeParams]] = []
+        for i, a in enumerate(fragments):
+            da, na, pa, normal_a, slant_a, conf_a, meta_a = a
+            for b in fragments[i + 1:]:
+                db, nb, pb, normal_b, slant_b, conf_b, meta_b = b
+                if na == nb:
+                    continue
+                dist = _pos_dist(pa, pb)
+                if dist > 2.5 * r_scale:
+                    continue
+                dihedral = slant_diff = None
+                if (normal_a is not None and normal_b is not None
+                        and slant_a is not None and slant_b is not None):
+                    dot = clamp(
+                        sum(normal_a[k] * normal_b[k] for k in range(3)),
+                        -1.0, 1.0,
+                    )
+                    dihedral = math.acos(dot)
+                    slant_diff = abs(slant_a - slant_b)
+                chrom_diff, lum_diff, tex_diff = _fragment_material_delta(meta_a, meta_b)
+                material_parts = [x for x in (chrom_diff, lum_diff, tex_diff)
+                                  if x is not None]
+                material_diff = max(material_parts) if material_parts else None
+                spatial = math.exp(-dist / (1.5 * r_scale))
+                pair_conf = min(conf_a, conf_b)
+
+                if (dihedral is not None and slant_diff is not None
+                        and (dihedral >= math.pi / 12.0
+                             or slant_diff >= math.pi / 18.0)):
+                    strength = max(dihedral / math.pi, slant_diff / (math.pi / 2.0))
+                    signal = spatial * max(0.0, min(1.0, strength))
+                    if signal > 0.01:
+                        ep = _edge_params(
+                            "EDGE_SURFACE_FOLD",
+                            {"normal_angle": dihedral,
+                             "material_diff": material_diff,
+                             "slant_diff": slant_diff},
+                            sign=1,
+                            confidence=float(pair_conf),
+                        )
+                        src, dst = (na, nb) if na < nb else (nb, na)
+                        surface_candidates.append((src, dst, signal, (src, dst), ep))
+
+
+                layers_a = sorted({int(row[0]) for row in (meta_a or ())
+                                   if len(row) > 0 and row[0] is not None})
+                layers_b = sorted({int(row[0]) for row in (meta_b or ())
+                                   if len(row) > 0 and row[0] is not None})
+                if layers_a and layers_b:
+                    la = layers_a[len(layers_a) // 2]
+                    lb = layers_b[len(layers_b) // 2]
+                    if la != lb:
+                        near, far = (na, nb) if la < lb else (nb, na)
+                        depth_diff = abs(la - lb)
+                        signal = spatial * max(0.05, min(1.0, pair_conf))
+                        ep = _edge_params(
+                            EdgeType.OCCLUSION,
+                            {"depth_diff": float(depth_diff),
+                             "source_cue": 2.0,
+                             "strength": float(signal)},
+                            sign=1,
+                            confidence=float(pair_conf),
+                        )
+                        occlusion_candidates.append((
+                            near, far, signal,
+                            (near, far, depth_diff), ep,
+                        ))
+
+                if material_diff is not None and material_diff >= 0.025:
+                    signal = spatial * material_diff
+                    ep = _edge_params(
+                        EdgeType.MATERIAL,
+                        {"chrom_diff": chrom_diff,
+                         "lum_diff": lum_diff,
+                         "tex_diff": tex_diff},
+                        sign=1,
+                        confidence=float(pair_conf),
+                    )
+                    src, dst = (na, nb) if na < nb else (nb, na)
+                    material_candidates.append((src, dst, signal, (src, dst), ep))
+
+        # Legacy two-dimensional Surface cues remain a fallback; the live
+        # 2.5D path above is the only source of full dihedral/depth/material.
+        legacy = []
         for d in dets:
             if d.k != "Surface":
                 continue
             pos = anchor_positions.get(d.alpha)
-            if pos is None:
-                continue
             nid = node_ids.get(d)
-            if nid is None:
-                continue
             normal = _surface_normal(d)
-            if normal is None:
-                continue
-            surf_info.append((pos, nid, normal))
-
-        if len(surf_info) < 2:
-            return
-
-        candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
-        for i in range(len(surf_info)):
-            pos_a, nid_a, n_a = surf_info[i]
-            for j in range(i + 1, len(surf_info)):
-                pos_b, nid_b, n_b = surf_info[j]
+            if pos is not None and nid is not None and normal is not None:
+                legacy.append((pos, nid, normal))
+        for i, (pos_a, nid_a, n_a) in enumerate(legacy):
+            for pos_b, nid_b, n_b in legacy[i + 1:]:
                 if nid_a == nid_b:
                     continue
-
                 dist = _pos_dist(pos_a, pos_b)
                 if dist > 2.5 * r_scale:
                     continue
-
-                dot = sum(n_a[k] * n_b[k] for k in range(3))
-                dot = clamp(dot, -1.0, 1.0)
+                dot = clamp(sum(n_a[k] * n_b[k] for k in range(3)), -1.0, 1.0)
                 dihedral = math.acos(dot)
-
                 if dihedral < math.pi / 12.0:
                     continue
-
-                dihedral_bin = float(clamp(int(round(dihedral / math.pi * 11.0)), 0, 11))
-
-                fold_theta = _safe_atan2(pos_b[1] - pos_a[1], pos_b[0] - pos_a[0]) % math.pi
-                fold_axis_bin = float(int(round(fold_theta / math.pi * 12.0)) % 12)
-
-                conn = tuple(pos_b[k] - pos_a[k] for k in range(min(3, len(pos_a), len(pos_b))))
-                if len(conn) < 3:
-                    conn = conn + (0.0,) * (3 - len(conn))
-                conn_len = math.sqrt(sum(c * c for c in conn))
-                if conn_len > 1e-9:
-                    conn_unit = tuple(c / conn_len for c in conn)
-                    dn = tuple(n_a[k] - n_b[k] for k in range(3))
-                    convex_score = sum(dn[k] * conn_unit[k] for k in range(3))
-                    if convex_score > 0.1:
-                        convexity_bin = 2.0
-                    elif convex_score < -0.1:
-                        convexity_bin = 0.0
-                    else:
-                        convexity_bin = 1.0
-                else:
-                    convexity_bin = 1.0
-
-                sharpness = dihedral / max(dist, 1e-6)
-                norm_sharpness = sharpness * r_scale / (math.pi / 2.0)
-                sharpness_bin = float(clamp(int(round(norm_sharpness * 7.0)), 0, 7))
-
                 signal = (dihedral / math.pi) * math.exp(-dist / (1.5 * r_scale))
-                if signal <= 0.01:
-                    continue
-
-                if convexity_bin >= 1.5:
-                    src, dst = nid_a, nid_b
-                elif convexity_bin <= 0.5:
-                    src, dst = nid_b, nid_a
-                else:
-                    src, dst = (nid_a, nid_b) if nid_a < nid_b else (nid_b, nid_a)
-
-                # [P2] THE NAMED WRITER: the DIHEDRAL ANGLE in RADIANS,
-                # the FOLD AXIS as an axial angle in RADIANS, the convexity
-                # as a categorical lookup key and the sharpness as a
-                # fraction.
                 ep = _edge_params(
                     "EDGE_SURFACE_FOLD",
-                    {"dihedral": dihedral, "fold_axis": fold_theta,
-                     "convexity": convexity_bin,
-                     "sharpness": max(0.0, min(1.0, norm_sharpness))},
+                    {"dihedral": dihedral, "fold_axis": 0.0,
+                     "convexity": 1.0, "sharpness": dihedral / math.pi},
                     sign=1,
-                    confidence=float(clamp(signal, 0.0, 1.0)),
+                    confidence=1.0,
                 )
-                candidates.append((src, dst, signal, (src, dst), ep))
+                src, dst = (nid_a, nid_b) if nid_a < nid_b else (nid_b, nid_a)
+                surface_candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.SURFACE_FOLD, candidates)
+        self._process_channel(EdgeType.SURFACE, surface_candidates)
+        self._process_channel(EdgeType.OCCLUSION, occlusion_candidates)
+        self._process_channel(EdgeType.MATERIAL, material_candidates)
 
     # __P23_SPIRAL_ANCHOR__
 
@@ -3045,128 +3150,58 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """V4 spiral: logarithmic-spiral contour pattern (Gallant et al. 1996).
-
-        V4 responses to spiral patterns are documented at the single-cell level
-        (passband tuning to polar/spiral form); the LOGARITHMIC-spiral claim is
-        an approximation -- the emitter detects locally constant pitch
-        (orientation-vs-radius angle), which a log-spiral satisfies but which
-        also admits near-spiral configurations. Undirected.
-
-        Pitch gate: excludes pure radial (~0) and pure circular (~pi/2) pairs;
-        only genuinely oblique orientation-vs-radius configurations emit.
-
-        Biology note (audit): the draft cited V4 non-Cartesian work without a
-        specific spiral paper. Gallant et al. 1993/1996 (Science) reports V4
-        selectivity for polar, hyperbolic, and Cartesian gratings including
-        spiral-like tuning. That is cited here; no stronger claim is made.
-        """
+        """Bind genuinely curved, radially expanding curves about one center."""
         if not anchor_positions:
             return
         r_scale = max(self._step_extraction_scale, 1.0)
-        n_theta = P.ORIENTATION_N_THETA
-
         spiral_info = []
         for d in dets:
-            if d.k not in ("Contour", "CurveComplex", "Orientation", "OrientationPol"):
-                continue
-            pos = anchor_positions.get(d.alpha)
-            if pos is None:
+            if d.k not in ("PEAK_CHAIN", "Contour"):
                 continue
             nid = node_ids.get(d)
             if nid is None:
                 continue
-            theta = _get_orientation_theta(d, n_theta)
-            if theta is None:
-                continue
-            spiral_info.append((pos, nid, theta))
-
+            profile = _spiral_profile(d, anchor_positions, r_scale)
+            if profile is not None:
+                spiral_info.append((d, nid, profile))
         if len(spiral_info) < 2:
             return
 
-        # Pitch passband: exclude radial (~0) and circular (~pi/2) extremes.
-        min_pitch = math.pi / 10.0
-        max_pitch = math.pi / 2.0 - math.pi / 10.0
-
         candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
-        for i in range(len(spiral_info)):
-            pos_a, nid_a, theta_a = spiral_info[i]
-            for j in range(i + 1, len(spiral_info)):
-                pos_b, nid_b, theta_b = spiral_info[j]
+        for i, (_da, nid_a, a) in enumerate(spiral_info):
+            for _db, nid_b, b in spiral_info[i + 1:]:
                 if nid_a == nid_b:
                     continue
-
-                dist = _pos_dist(pos_a, pos_b)
-                if dist > 4.0 * r_scale or dist < 0.3 * r_scale:
+                center_dist = math.hypot(a[0] - b[0], a[1] - b[1])
+                if center_dist > 0.5 * r_scale:
                     continue
-
-                # Midpoint as the provisional spiral centre (pairwise approx).
-                hub_x = (pos_a[0] + pos_b[0]) / 2.0
-                hub_y = (pos_a[1] + pos_b[1]) / 2.0
-
-                rad_a = _safe_atan2(pos_a[1] - hub_y, pos_a[0] - hub_x)
-                rad_b = _safe_atan2(pos_b[1] - hub_y, pos_b[0] - hub_x)
-
-                # Orientation is AXIAL (mod pi): fold the radius direction too.
-                pitch_a = _angular_diff_pi(theta_a, rad_a % math.pi)
-                pitch_b = _angular_diff_pi(theta_b, rad_b % math.pi)
-
-                if not (min_pitch < pitch_a < max_pitch and min_pitch < pitch_b < max_pitch):
-                    continue
-
-                pitch_diff = abs(pitch_a - pitch_b)
+                pitch_diff = abs(a[3] - b[3])
                 if pitch_diff > math.pi / 6.0:
                     continue
-
-                mean_pitch = (pitch_a + pitch_b) / 2.0
-                # Axial pitch in [0, pi/2] binned LINEARLY 0..11 (range 12.0).
-                pitch_bin = float(clamp(int(round(mean_pitch / (math.pi / 2.0) * 11.0)), 0, 11))
-
-                consistency = 1.0 - pitch_diff / (math.pi / 6.0)
-                consistency_bin = float(clamp(int(round(consistency * 7.0)), 0, 7))
-
-                # Chirality from axial cross products (orientation mod pi):
-                # sign of sin(theta - rad) per element, averaged. Axial-safe
-                # because both theta and rad are folded to the same space.
-                cross_a = math.cos(rad_a) * math.sin(theta_a) - math.sin(rad_a) * math.cos(theta_a)
-                cross_b = math.cos(rad_b) * math.sin(theta_b) - math.sin(rad_b) * math.cos(theta_b)
-                mean_cross = (cross_a + cross_b) / 2.0
-                if mean_cross > 0.15:
-                    chirality_bin = 2.0
-                elif mean_cross < -0.15:
-                    chirality_bin = 0.0
-                else:
-                    chirality_bin = 1.0
-
-                # Log-spiral expansion: d ln r / d phi over the pair's arc.
-                r_a = math.sqrt((pos_a[0] - hub_x) ** 2 + (pos_a[1] - hub_y) ** 2)
-                r_b = math.sqrt((pos_b[0] - hub_x) ** 2 + (pos_b[1] - hub_y) ** 2)
-                angular_sep = _angular_diff(rad_a, rad_b)
-                if angular_sep > 0.1:
-                    expansion = abs(math.log(max(r_a, 0.01) / max(r_b, 0.01))) / angular_sep
-                else:
-                    expansion = 0.0
-                expansion_bin = float(clamp(int(round(expansion * 3.0)), 0, 7))
-
-                signal = consistency * math.exp(-dist / (3.0 * r_scale))
+                # Radial expansion is measured from the fitted shared center;
+                # straight edges and closed polygons fail before this point.
+                expansion = min(a[4], b[4])
+                if expansion <= 0.15:
+                    continue
+                consistency = min(a[6], b[6]) * max(
+                    0.0, 1.0 - pitch_diff / (math.pi / 6.0)
+                )
+                signal = consistency * math.exp(-center_dist / (0.5 * r_scale))
                 if signal <= 0.01:
                     continue
-
                 src, dst = (nid_a, nid_b) if nid_a < nid_b else (nid_b, nid_a)
-
-                # [P2] THE NAMED WRITER: the mean PITCH in RADIANS (axial,
-                # it folds), the consistency and the expansion as fractions
-                # and the chirality as a categorical lookup key.
+                chirality = a[5] if a[5] == b[5] else 0.0
                 ep = _edge_params(
                     "EDGE_SPIRALITY",
-                    {"pitch": mean_pitch, "consistency": consistency,
-                     "chirality": chirality_bin, "expansion": expansion},
+                    {"pitch": 0.5 * (a[3] + b[3]),
+                     "consistency": consistency,
+                     "chirality": chirality,
+                     "expansion": expansion},
                     sign=1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
-
-        self._process_channel(EdgeType.SPIRALITY, candidates)
+        self._process_channel(EdgeType.SHAPE, candidates)
 
     def _run_radiality(
         self,
@@ -3174,114 +3209,135 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """V4 radial: orientations converging on a common hub (Gallant et al. 1996). Undirected."""
+        """Emit radial structure only from a >=3-spoke common hub cluster."""
         if not anchor_positions:
             return
         r_scale = max(self._step_extraction_scale, 1.0)
-        n_theta = P.ORIENTATION_N_THETA
-
-        orient_info = []
+        spokes = []
+        # Radiality is a relation among contour spines, not among every V1
+        # orientation response in a textured region.  Use the PEAK_CHAIN
+        # spine (and the gated legacy Contour input) only.  A sharp corner's
+        # bisector points toward the centre of a box and is a classic false
+        # spoke, so only locally smooth vertices (turn <= 22.5 degrees) vote.
         for d in dets:
-            theta = _get_orientation_theta(d, n_theta)
-            if theta is None:
-                continue
-            pos = anchor_positions.get(d.alpha)
-            if pos is None:
-                continue
             nid = node_ids.get(d)
-            if nid is None:
+            if nid is None or d.k not in ("PEAK_CHAIN", "Contour"):
                 continue
-            orient_info.append((pos, nid, theta))
-
-        if len(orient_info) < 2:
+            q = tuple(d.sigma.quantized)
+            if len(q) > 3 and float(q[3]) >= 0.5:
+                continue  # a closed box/circle is not a bundle of spokes
+            geom = _member_polyline_geometry(d, anchor_positions)
+            if len(geom) < 2:
+                continue
+            end_indices = {geom[0][4], geom[-1][4]}
+            for row in geom:
+                # A real spoke terminates at the common hub.  Interior points
+                # of a long box edge whose tangent merely crosses the hub do
+                # not count as radial support.
+                if row[4] not in end_indices:
+                    continue
+                if abs(float(row[3])) > 0.125:
+                    continue
+                spokes.append((row[1], nid, row[2], row[3], row[4]))
+        if len(spokes) < 3:
             return
 
-        candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
-        tol = math.pi / 5.0
-
-        for i in range(len(orient_info)):
-            pos_a, nid_a, theta_a = orient_info[i]
-            for j in range(i + 1, len(orient_info)):
-                pos_b, nid_b, theta_b = orient_info[j]
-                if nid_a == nid_b:
+        # Pairwise line intersections seed hub clusters. Every emitted hub is
+        # subsequently verified against >=3 distinct node spokes and >=3
+        # distinct axial orientations; a two-axis box corner cannot pass.
+        hub_seeds = []
+        for i, a in enumerate(spokes):
+            pa, _na, ta, _ca, _ia = a
+            for b in spokes[i + 1:]:
+                pb, _nb, tb, _cb, _ib = b
+                delta = abs(_axial_wrap(ta - tb))
+                if delta < math.pi / 18.0 or delta > math.pi / 2.0 - math.pi / 18.0:
                     continue
-
-                dist = _pos_dist(pos_a, pos_b)
-                if dist > 4.0 * r_scale or dist < 0.3 * r_scale:
+                ca, sa = math.cos(ta), math.sin(ta)
+                cb, sb = math.cos(tb), math.sin(tb)
+                cross = ca * sb - sa * cb
+                if abs(cross) < 1e-8:
                     continue
-
-                ca, sa = math.cos(theta_a), math.sin(theta_a)
-                cb, sb = math.cos(theta_b), math.sin(theta_b)
-
-                det_cross = ca * sb - sa * cb
-                if abs(det_cross) < 1e-6:
+                dx, dy = float(pb[0]) - float(pa[0]), float(pb[1]) - float(pa[1])
+                amount = (dx * sb - dy * cb) / cross
+                hx, hy = float(pa[0]) + amount * ca, float(pa[1]) + amount * sa
+                da = math.hypot(hx - float(pa[0]), hy - float(pa[1]))
+                db = math.hypot(hx - float(pb[0]), hy - float(pb[1]))
+                if min(da, db) < 0.05 * r_scale or max(da, db) > 6.0 * r_scale:
                     continue
+                hub_seeds.append((hx, hy))
 
-                dx = pos_b[0] - pos_a[0]
-                dy = pos_b[1] - pos_a[1]
-                t = (dx * sb - dy * cb) / det_cross
+        if not hub_seeds:
+            return
+        hub_seeds.sort(key=lambda p: (p[0], p[1]))
+        clusters: List[List[Tuple[float, float]]] = []
+        for hub in hub_seeds:
+            match = None
+            for cluster in clusters:
+                cx = sum(p[0] for p in cluster) / len(cluster)
+                cy = sum(p[1] for p in cluster) / len(cluster)
+                if math.hypot(hub[0] - cx, hub[1] - cy) <= 0.5 * r_scale:
+                    match = cluster
+                    break
+            if match is None:
+                clusters.append([hub])
+            else:
+                match.append(hub)
 
-                hub_x = pos_a[0] + t * ca
-                hub_y = pos_a[1] + t * sa
-
-                hub_dist_a = math.sqrt((hub_x - pos_a[0]) ** 2 + (hub_y - pos_a[1]) ** 2)
-                hub_dist_b = math.sqrt((hub_x - pos_b[0]) ** 2 + (hub_y - pos_b[1]) ** 2)
-                max_hub_dist = 6.0 * r_scale
-                if hub_dist_a > max_hub_dist or hub_dist_b > max_hub_dist:
+        candidates: List[Tuple[int, int, float, Tuple[Any, ...], EdgeParams]] = []
+        for cluster_index, cluster in enumerate(clusters):
+            hub_x = sum(p[0] for p in cluster) / len(cluster)
+            hub_y = sum(p[1] for p in cluster) / len(cluster)
+            by_node: Dict[int, Tuple[float, float, float, float]] = {}
+            for pos, nid, theta, curvature, vertex in spokes:
+                dx, dy = hub_x - float(pos[0]), hub_y - float(pos[1])
+                radius = math.hypot(dx, dy)
+                if radius < 0.05 * r_scale or radius > 0.75 * r_scale:
                     continue
-                if hub_dist_a < 0.1 * r_scale and hub_dist_b < 0.1 * r_scale:
+                bearing = math.atan2(dy, dx) % math.pi
+                dev = _angular_diff_pi(theta, bearing)
+                if dev > math.pi / 10.0:
                     continue
-
-                ang_a_to_hub = _safe_atan2(hub_y - pos_a[1], hub_x - pos_a[0]) % math.pi
-                ang_b_to_hub = _safe_atan2(hub_y - pos_b[1], hub_x - pos_b[0]) % math.pi
-                dev_a = _angular_diff_pi(theta_a, ang_a_to_hub)
-                dev_b = _angular_diff_pi(theta_b, ang_b_to_hub)
-
-                if dev_a > tol or dev_b > tol:
+                perpendicular = abs(dx * math.sin(theta) - dy * math.cos(theta))
+                if perpendicular > 0.5 * r_scale:
                     continue
-
-                mid_x = (pos_a[0] + pos_b[0]) / 2.0
-                mid_y = (pos_a[1] + pos_b[1]) / 2.0
-                hub_bearing = _safe_atan2(hub_y - mid_y, hub_x - mid_x) % (2.0 * math.pi)
-                hub_bearing_bin = float(int(round(hub_bearing / (2.0 * math.pi) * 24.0)) % 24)
-
-                mean_dev = (dev_a + dev_b) / 2.0
-                align_bin = float(clamp(int(round(mean_dev / (math.pi / 2.0) * 7.0)), 0, 7))
-
-                mean_hub_dist = (hub_dist_a + hub_dist_b) / 2.0
-                hub_ratio = mean_hub_dist / max(dist, 1e-6)
-                hub_ratio_bin = float(clamp(int(round(hub_ratio)), 0, 7))
-
-                spoke_angle = abs(
-                    _safe_atan2(pos_a[1] - hub_y, pos_a[0] - hub_x) -
-                    _safe_atan2(pos_b[1] - hub_y, pos_b[0] - hub_x)
-                )
-                spoke_angle = min(spoke_angle, 2.0 * math.pi - spoke_angle)
-                # Axial spoke separation on [0, pi]: 12 LINEAR bins (range 12.0).
-                # NOT circular on 24: axial quantities fold, they do not wrap.
-                spoke_bin = float(clamp(int(round(spoke_angle / math.pi * 11.0)), 0, 11))
-
-                alignment_quality = 1.0 - mean_dev / tol
-                distance_factor = math.exp(-dist / (3.0 * r_scale))
-                signal = alignment_quality * distance_factor
-                if signal <= 0.01:
-                    continue
-
-                src, dst = (nid_a, nid_b) if nid_a < nid_b else (nid_b, nid_a)
-
-                # [P2] THE NAMED WRITER: the hub BEARING in RADIANS, the
-                # mean AXIAL DEVIATION in RADIANS, the hub ratio and the
-                # spoke separation (axial, it folds) in RADIANS.
-                ep = _edge_params(
-                    "EDGE_RADIALITY",
-                    {"hub_bearing": hub_bearing, "alignment": mean_dev,
-                     "hub_ratio": hub_ratio, "spoke_separation": spoke_angle},
-                    sign=1,
-                    confidence=float(clamp(signal, 0.0, 1.0)),
-                )
-                candidates.append((src, dst, signal, (src, dst), ep))
-
-        self._process_channel(EdgeType.RADIALITY, candidates)
+                row = (dev, radius, theta % math.pi, curvature)
+                old = by_node.get(nid)
+                if old is None or (row[0], row[1]) < (old[0], old[1]):
+                    by_node[nid] = row
+            if len(by_node) < 3:
+                continue
+            angle_bins = {
+                int(round(row[2] / math.pi * 12.0)) % 12
+                for row in by_node.values()
+            }
+            if len(angle_bins) < 3:
+                continue
+            member_ids = sorted(by_node)
+            for i, a_id in enumerate(member_ids):
+                for b_id in member_ids[i + 1:]:
+                    a, b = by_node[a_id], by_node[b_id]
+                    angle_delta = abs(_axial_wrap(a[2] - b[2]))
+                    align_quality = max(0.0, 1.0 - 0.5 * (a[0] + b[0]) / (math.pi / 10.0))
+                    signal = align_quality * math.exp(-0.5 * (a[1] + b[1]) / (5.0 * r_scale))
+                    if signal <= 0.01:
+                        continue
+                    ratio = max(a[1], b[1]) / max(min(a[1], b[1]), 1e-6)
+                    curvature = 0.5 * (a[3] + b[3])
+                    ep = _edge_params(
+                        "EDGE_RADIALITY",
+                        {"hub_bearing": math.atan2(hub_y, hub_x) % (2.0 * math.pi),
+                         "alignment": 1.0 - align_quality,
+                         "hub_ratio": ratio,
+                         "spoke_separation": angle_delta,
+                         "curvature": curvature},
+                        sign=1,
+                        confidence=float(clamp(signal, 0.0, 1.0)),
+                    )
+                    src, dst = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+                    key = (src, dst, cluster_index)
+                    candidates.append((src, dst, signal, key, ep))
+        self._process_channel(EdgeType.SHAPE, candidates)
 
     # __P23_RADIAL_SPIRAL_ANCHOR__
 
@@ -3395,7 +3451,7 @@ class Binder:
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.COLOR_OPPONENT_BORDER, candidates)
+        self._process_channel(EdgeType.MATERIAL, candidates)
 
     def _run_motion_opposition(
         self,
@@ -3507,7 +3563,7 @@ class Binder:
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.MOTION_OPPOSITION, candidates)
+        self._process_channel(EdgeType.MATERIAL, candidates)
 
     def _run_cross_scale_identity(
         self,
@@ -3611,7 +3667,7 @@ class Binder:
                     )
                     candidates.append((nid_c, nid_f, signal, (nid_c, nid_f), ep))
 
-        self._process_channel(EdgeType.CROSS_SCALE_IDENTITY, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     def _binocular_disparity_enabled(
         self, anchor_positions: Optional[Dict[Any, Tuple[float, ...]]]
@@ -3740,7 +3796,7 @@ class Binder:
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.BINOCULAR_DISPARITY, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     def _run_line_termination(
         self,
@@ -3748,24 +3804,11 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """[Pass 23] End-stopped terminator -> parent segment. Directed.
+        """End-stopped line -> occluding PEAK_CHAIN/segment, near -> far.
 
-        Biology: end-stopped hypercomplex cells respond to line ends and
-        corners (Hubel & Wiesel; V2 end-stopping). The ENDSTOPPED signature
-        slots are (theta_bin, sf_bin, ends, strength_bin) -- see
-        EndStoppedLens in derived_lenses.py.
-
-        Audit fix vs. the blueprint draft: the draft read slot 0 as
-        "raw_sharpness" and slot 1 as "curvature". Those are the terminator's
-        orientation and its spatial frequency; strength is slot 3. Sharpness
-        now reads slot 3 (slot 2 as a 3-slot fallback), and curvature is
-        derived from the adjacent parent orientations, which is what it
-        physically means.
-
-        Audit fix vs. the blueprint draft: the parent-orientation slot is
-        AXIAL (mod pi), so it is binned to 12 with a declared 12-cycle and
-        range 6.0. The draft declared a 24-cycle for a mod-pi quantity,
-        which made adjacent axial values score as maximally different.
+        For PEAK_CHAIN (and legacy Contour) targets the geometry is read at
+        the nearest member peak and its local tangent, never at the chain
+        centroid. The edge is an OCCLUSION cue and always has positive sign.
         """
         if not anchor_positions:
             return
@@ -3776,55 +3819,73 @@ class Binder:
             if d.k != "EndStopped" and not is_junction_kind(d.k):
                 continue
             nid = node_ids.get(d)
-            if nid is None:
-                continue
             pos = anchor_positions.get(d.alpha)
-            if pos is None:
-                continue
-            term_info.append((pos, nid, d.sigma.quantized))
+            if pos is None and d.k != "EndStopped":
+                pos = _mean_position(_extract_member_anchors(d), anchor_positions)
+            if nid is not None and pos is not None:
+                term_info.append((d, pos, nid, tuple(d.sigma.quantized)))
 
         orient_info = []
+        chain_info = []
         for d in dets:
-            if d.k not in ("Orientation", "OrientationPol", "Contour"):
-                continue
-            pos = anchor_positions.get(d.alpha)
-            if pos is None:
-                continue
             nid = node_ids.get(d)
             if nid is None:
                 continue
-            theta = _get_orientation_theta(d, P.ORIENTATION_N_THETA)
-            if theta is None and d.sigma.class_ in ("ORIENTATION", "ORIENTATION_POL"):
-                q = d.sigma.quantized
-                if len(q) >= 1:
-                    theta = (float(q[0]) + 0.5) * math.pi / P.ORIENTATION_N_THETA
-            if theta is None:
-                continue
-            orient_info.append((pos, nid, theta))
+            if d.k in ("Orientation", "OrientationPol"):
+                pos = anchor_positions.get(d.alpha)
+                theta = _get_orientation_theta(d, P.ORIENTATION_N_THETA)
+                if theta is None and d.sigma.class_ in ("ORIENTATION", "ORIENTATION_POL"):
+                    q = d.sigma.quantized
+                    if q:
+                        theta = (float(q[0]) + 0.5) * math.pi / P.ORIENTATION_N_THETA
+                if pos is not None and theta is not None:
+                    orient_info.append((pos, nid, theta))
+            elif d.k in ("PEAK_CHAIN", "Contour"):
+                geom = _member_polyline_geometry(d, anchor_positions)
+                if geom:
+                    chain_info.append((d, nid, geom))
 
-        if not term_info or not orient_info:
+        if not term_info or (not orient_info and not chain_info):
             return
 
         candidates: List[Tuple[int, int, float, Tuple[int, int], EdgeParams]] = []
-        for t_pos, t_nid, t_q in term_info:
-            nearby = []
+        for _term, t_pos, t_nid, t_q in term_info:
+            # Collapse multiple representations of the same pattern node to
+            # its closest local support before classifying a junction.
+            nearest_by_node: Dict[int, Tuple[float, float]] = {}
             for o_pos, o_nid, o_theta in orient_info:
                 if o_nid == t_nid:
                     continue
                 dd = _pos_dist(t_pos, o_pos)
                 if dd < 2.5 * r_scale:
-                    nearby.append((dd, o_nid, o_theta))
+                    prev = nearest_by_node.get(o_nid)
+                    if prev is None or (dd, o_theta) < prev:
+                        nearest_by_node[o_nid] = (dd, o_theta)
+            for chain, c_nid, geom in chain_info:
+                if c_nid == t_nid:
+                    continue
+                nearest = min(
+                    ((math.hypot(float(t_pos[0]) - row[1][0],
+                                 float(t_pos[1]) - row[1][1]), row[2])
+                     for row in geom),
+                    key=lambda item: (item[0], serialize_value(chain.alpha)),
+                )
+                if nearest[0] < 2.5 * r_scale:
+                    prev = nearest_by_node.get(c_nid)
+                    if prev is None or (nearest[0], nearest[1]) < prev:
+                        nearest_by_node[c_nid] = nearest
+
+            nearby = sorted(
+                ((dist, nid, theta) for nid, (dist, theta) in nearest_by_node.items()),
+                key=lambda row: (row[0], row[1]),
+            )
             if not nearby:
                 continue
-
-            nearby.sort(key=lambda x: (x[0], x[1]))
             n_seg = len(nearby)
 
             if n_seg == 1:
                 junction_type = 0.0
             elif n_seg == 2:
-                # Collinearity from the two parent orientations: two arms of
-                # one line give an axial difference near zero.
                 dtheta = _angular_diff_pi(nearby[0][2], nearby[1][2])
                 junction_type = 2.0 if dtheta < math.pi / 12.0 else 1.0
             elif n_seg == 3:
@@ -3835,25 +3896,19 @@ class Binder:
             if len(t_q) > 3:
                 sharpness = clamp(float(t_q[3]) / 8.0, 0.0, 1.0)
             elif len(t_q) > 2:
-                # 3-slot variant: slot 2 is `ends` in {0, 1, 2}.
                 sharpness = clamp(float(t_q[2]) / 2.0, 0.0, 1.0)
             else:
                 sharpness = 0.5
-
             if n_seg >= 2:
-                corner = _angular_diff_pi(nearby[0][2], nearby[1][2])
-                curvature = clamp(corner / (math.pi / 2.0), 0.0, 1.0)
+                curvature = clamp(
+                    _angular_diff_pi(nearby[0][2], nearby[1][2])
+                    / (math.pi / 2.0), 0.0, 1.0
+                )
             else:
                 curvature = 0.0
 
-            nearest_dist, parent_nid, parent_theta = nearby[0]
-
             junction_bin = float(clamp(int(junction_type), 0, 4))
-            sharpness_bin = float(clamp(int(round(sharpness * 7.0)), 0, 7))
-            curvature_bin = float(clamp(int(round(curvature * 7.0)), 0, 7))
-            parent_bin = float(int(round(parent_theta / math.pi * 12.0)) % 12)
-
-            proximity = math.exp(-nearest_dist / r_scale)
+            proximity = math.exp(-nearby[0][0] / r_scale)
             signal = sharpness * proximity
             if junction_type == 2.0:
                 signal *= 1.3
@@ -3861,313 +3916,350 @@ class Binder:
             if signal <= 0.01:
                 continue
 
-            # [P2] THE NAMED WRITER: the junction TYPE is a categorical
-            # lookup key; the sharpness and the curvature are FRACTIONS; the
-            # parent's orientation is an AXIAL ANGLE in RADIANS.
-            ep = _edge_params(
-                "EDGE_LINE_TERMINATION",
-                {"junction_type": junction_bin, "sharpness": sharpness,
-                 "curvature": curvature, "parent_theta": parent_theta},
-                sign=1,
-                confidence=float(signal),
-            )
-            candidates.append((t_nid, parent_nid, signal, (t_nid, parent_nid), ep))
+            # The line/chain that continues across the meeting is the near
+            # occluding side; the end-stopped line is the far terminated side.
+            for arm_index, (_dist, occluder_nid, parent_theta) in enumerate(nearby[:2]):
+                arm_signal = signal if arm_index == 0 else signal * 0.8
+                ep = _edge_params(
+                    "EDGE_LINE_TERMINATION",
+                    {"junction_type": junction_bin, "sharpness": sharpness,
+                     "curvature": curvature, "parent_theta": parent_theta},
+                    sign=1,
+                    confidence=float(arm_signal),
+                )
+                candidates.append((occluder_nid, t_nid, arm_signal,
+                                   (occluder_nid, t_nid), ep))
 
-            # A genuine corner makes the terminator evidence for BOTH arms.
-            # The non-primary arm is emitted as an occluding (gating)
-            # relation.
-            if junction_type in (1.0, 4.0) and n_seg >= 2:
-                second_nid, second_theta = nearby[1][1], nearby[1][2]
-                if second_nid != t_nid:
-                    ep_occl = _edge_params(
-                        "EDGE_LINE_TERMINATION",
-                        {"junction_type": junction_bin, "sharpness": sharpness,
-                         "curvature": curvature, "parent_theta": second_theta},
-                        sign=-1,
-                        confidence=float(signal * 0.8),
-                    )
-                    candidates.append(
-                        (t_nid, second_nid, signal * 0.8,
-                         (t_nid, second_nid), ep_occl)
-                    )
-
-        self._process_channel(EdgeType.LINE_TERMINATION, candidates)
+        self._process_channel(EdgeType.OCCLUSION, candidates)
 
     # -------------------------------------------------------------------------
     # Shared emission mechanism (§2.7)
     # -------------------------------------------------------------------------
+
+    def _canonical_edge_params(
+        self,
+        edge_type: EdgeType,
+        params: Optional[EdgeParams],
+        signal: float,
+        src: int,
+        dst: int,
+    ) -> EdgeParams:
+        """Encode every emitter payload in the selected physical category schema.
+
+        Legacy emitters remain small geometry producers; this boundary is the
+        single canonicalisation point that translates their named measurements
+        to the eight shared category axes and attaches endpoint confidence.
+        """
+        raw = dict(getattr(params, "measurements", ()) or ())
+        source = str(getattr(params, "schema", ""))
+        scale = max(float(self._step_extraction_scale), 1e-6)
+        pa = self._node_position.get(src)
+        pb = self._node_position.get(dst)
+        dxy = None
+        dist_px = None
+        if pa is not None and pb is not None and len(pa) >= 2 and len(pb) >= 2:
+            dx, dy = float(pb[0]) - float(pa[0]), float(pb[1]) - float(pa[1])
+            dxy = (dx, dy)
+            dist_px = math.hypot(dx, dy)
+
+        def _value(*names, default=None):
+            for name in names:
+                value = raw.get(name)
+                if value is None:
+                    continue
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    return value
+            return default
+
+        def _clamp(value, lo, hi):
+            if value is None:
+                return None
+            return max(lo, min(hi, float(value)))
+
+        sign = int(getattr(params, "sign", 1) or 1)
+        if edge_type == EdgeType.OCCLUSION:
+            sign = 1  # directed near -> far order is never a signed repulsion
+        confidence = min(
+            self._node_z.get(src, 0.0),
+            self._node_z.get(dst, 0.0),
+        )
+
+        values: Dict[str, Optional[float]]
+        if edge_type == EdgeType.PROXIMITY:
+            old_dist = _value("distance", "dist", "spatial_dist", "gap", "offset")
+            if source == "EDGE_CO_LOCATED":
+                physical_dist = 0.0
+            elif source == "EDGE_CONTACT" and old_dist is not None:
+                physical_dist = old_dist
+            elif dist_px is not None:
+                physical_dist = dist_px
+            elif old_dist is not None:
+                # Cross-scale offsets are already in extraction-scale units;
+                # other legacy geometry values are in image coordinates.
+                physical_dist = old_dist * scale if "CROSS_SCALE" in source else old_dist
+            else:
+                physical_dist = None
+            distance = (None if physical_dist is None else
+                        math.log1p(max(0.0, physical_dist) / scale))
+            bearing = None
+            if dxy is not None and math.hypot(*dxy) > 1e-9:
+                bearing = math.atan2(dxy[1], dxy[0]) % math.pi
+            else:
+                bearing = _value("bearing", "theta", "heading")
+            scale_ratio = _value("scale_ratio", "octave_ratio", "scale_diff")
+            if scale_ratio is None:
+                sa, sb = self._node_scale.get(src), self._node_scale.get(dst)
+                if sa is not None and sb is not None and sa > 0.0 and sb > 0.0:
+                    scale_ratio = math.log2(sa / sb)
+            values = {
+                "distance": _clamp(distance, 0.0, 4.0),
+                "bearing": bearing,
+                "scale_ratio": _clamp(scale_ratio, -2.0, 2.0),
+            }
+        elif edge_type == EdgeType.CONTINUITY:
+            gap = _value("gap", "dist", "gap_w", "dist_w", "chord_dist",
+                         "perp_dist", "stagger_dist")
+            if gap is None and dist_px is not None:
+                gap = dist_px / scale
+            turn = _value("turn_angle", "turn", "incidence", "error",
+                          "tangent_err", "angle_delta", "cross_angle",
+                          "pitch", "mean_pitch")
+            perp = _value("perp_offset", "perp", "perp_dist", "stagger_dist",
+                          "mean_perp")
+            curv = _value("curv_agree", "curvature_agree", "curvature",
+                          "curv_diff", "curvature_diff", "cocirc_asym",
+                          "consistency")
+            if curv is not None and 0.0 <= curv <= 1.0:
+                if any(k in raw for k in ("curv_agree", "curvature_agree", "consistency")):
+                    curv = 2.0 * curv - 1.0
+                elif any(k in raw for k in ("curv_diff", "curvature_diff", "cocirc_asym")):
+                    curv = 1.0 - 2.0 * curv
+            values = {
+                "gap": _clamp(gap, 0.0, 4.0),
+                "turn_angle": _clamp(turn, -math.pi / 2.0, math.pi / 2.0),
+                "perp_offset": _clamp(perp, 0.0, 3.0),
+                "curv_agree": _clamp(curv, -1.0, 1.0),
+            }
+        elif edge_type == EdgeType.CONTAINMENT:
+            rel_dist = _value("rel_dist", "relative_distance", "rel_r")
+            if rel_dist is None and dist_px is not None:
+                rel_dist = dist_px / scale
+            angle = _value("polar_angle", "rel_theta", "bearing")
+            if angle is None and dxy is not None and math.hypot(*dxy) > 1e-9:
+                angle = math.atan2(dxy[1], dxy[0]) % (2.0 * math.pi)
+            ratio = _value("scale_ratio", "log_ratio", "size_ratio")
+            if ratio is None:
+                sa, sb = self._node_scale.get(src), self._node_scale.get(dst)
+                if sa is not None and sb is not None and sa > 0.0 and sb > 0.0:
+                    ratio = math.log2(sa / sb)
+            values = {
+                "rel_dist": _clamp(rel_dist, 0.0, 2.0),
+                "polar_angle": angle,
+                "scale_ratio": _clamp(ratio, -3.0, 1.0),
+            }
+        elif edge_type == EdgeType.OCCLUSION:
+            depth = _value("depth_diff", "depth_units", "dz", "depth",
+                           "stack_depth", "gap")
+            source_cue = _value("source_cue", "source", "junction_type",
+                                "topology_class", default=0.0)
+            strength = _value("strength", "confidence", default=signal)
+            values = {
+                "depth_diff": _clamp(abs(depth) if depth is not None else None, 0.0, 4.0),
+                "source_cue": _clamp(source_cue, 0.0, 3.0),
+                "strength": _clamp(strength, 0.0, 1.0),
+            }
+        elif edge_type == EdgeType.JUNCTION:
+            angle = _value("angle_delta", "incidence", "cross_angle", "turn",
+                           "spatial_angle", "tangent_err")
+            topo = _value("topo_class", "topology_class", "topo", "junction_type")
+            arms = _value("arm_count", "n_arms", "degree", "branches")
+            for nid in (src, dst):
+                sig = self._node_signature.get(nid)
+                kind = getattr(sig, "class_", "")
+                q = tuple(getattr(sig, "quantized", ()) or ())
+                if kind == "JUNCTION" and len(q) >= 3:
+                    if arms is None:
+                        arms = float(q[0]) + 2.0
+                    if topo is None:
+                        topo = float(q[2])
+                    break
+            values = {
+                "angle_delta": _clamp(abs(angle) if angle is not None else None,
+                                      0.0, math.pi / 2.0),
+                "topo_class": _clamp(topo, 0.0, 6.0),
+                "arm_count": _clamp(arms, 2.0, 7.0),
+            }
+        elif edge_type == EdgeType.SURFACE:
+            normal_angle = _value("normal_angle", "dihedral", "fold_angle")
+            slant_diff = _value("slant_diff", "slant_angle")
+            material_diff = _value("material_diff", "grad_diff", "contrast_step",
+                                   "color_dist", "tex_dist", "congruence")
+            if normal_angle is None or slant_diff is None:
+                normals = []
+                slants = []
+                for nid in (src, dst):
+                    sig = self._node_signature.get(nid)
+                    q = tuple(getattr(sig, "quantized", ()) or ())
+                    if (getattr(sig, "class_", "") == "SURFACE_FRAGMENT"
+                            and getattr(sig, "relation", "") == "SURFACE_FRAGMENT_ORIENTATION"
+                            and len(q) >= 2):
+                        slant = (float(q[0]) + 0.5) * (math.pi / 2.0) / 8.0
+                        tilt = (float(q[1]) + 0.5) * (2.0 * math.pi) / 12.0
+                        slants.append(slant)
+                        normals.append((math.sin(slant) * math.cos(tilt),
+                                        math.sin(slant) * math.sin(tilt),
+                                        math.cos(slant)))
+                if len(normals) == 2:
+                    dot = clamp(sum(normals[0][k] * normals[1][k] for k in range(3)), -1.0, 1.0)
+                    normal_angle = math.acos(dot)
+                    slant_diff = abs(slants[0] - slants[1])
+            values = {
+                "normal_angle": _clamp(normal_angle, 0.0, math.pi),
+                "material_diff": _clamp(material_diff, 0.0, 1.0),
+                "slant_diff": _clamp(slant_diff, 0.0, math.pi / 2.0),
+            }
+        elif edge_type == EdgeType.SHAPE:
+            symmetry = _value("sym_score", "symmetry", "symmetry_score",
+                              "consistency")
+            alignment_error = _value("alignment")
+            if symmetry is None and alignment_error is not None:
+                # Legacy RADIALITY wrote angular deviation under `alignment`.
+                symmetry = 1.0 - min(1.0, abs(alignment_error))
+            radial = _value("radial_ratio", "hub_ratio", "expansion",
+                            "log_ratio", "pitch", "extent")
+            curvature = _value("curvature", "curv_rate", "signed_turn",
+                               "curv_diff", "chirality", "curvature_sign")
+            if curvature is not None and not any(k in raw for k in ("curvature", "curvature_sign")):
+                curvature = math.copysign(min(1.0, abs(curvature)), curvature)
+            values = {
+                "sym_score": _clamp(symmetry, 0.0, 1.0),
+                "radial_ratio": _clamp(abs(radial) if radial is not None else None, 0.0, 3.0),
+                "curvature": _clamp(curvature, -1.0, 1.0),
+            }
+        else:  # MATERIAL
+            chrom = _value("chrom_diff", "chroma_diff", "contrast",
+                           "opp_angle", "dir_contrast", "angle_diff",
+                           "hue_diff", "color_dist")
+            lum = _value("lum_diff", "lum_indep", "speed_contrast",
+                         "speed_ratio", "mean_speed", "contrast_step")
+            tex = _value("tex_diff", "tex_dist", "texture_diff", "similarity",
+                         "extent", "spatial_dist", "speed")
+            if any(k in raw for k in ("opp_angle", "dir_contrast", "angle_diff", "hue_diff")) and chrom is not None:
+                chrom = chrom / math.pi
+            if "similarity" in raw and tex is not None:
+                tex = 1.0 - tex
+            values = {
+                "chrom_diff": _clamp(chrom, 0.0, 1.0),
+                "lum_diff": _clamp(lum, 0.0, 1.0),
+                "tex_diff": _clamp(tex, 0.0, 1.0),
+            }
+
+        return _edge_params(
+            edge_type,
+            values,
+            sign=sign,
+            confidence=float(clamp(confidence, 0.0, 1.0)),
+        )
 
     def _process_channel(
         self,
         edge_type: EdgeType,
         candidates: List[Tuple[int, int, float, Tuple[Any, ...]]],
     ) -> None:
-        """Apply the channel's threshold + hysteresis and lay down edges.
+        """Gate and immediately write one sub-pass; defer channel state commit.
 
-        candidates: list of (src_node_id, dst_node_id, raw_signal, key_tuple).
-        key_tuple: per-channel-unique canonical tuple for M_prev tracking.
+        The edge store is updated in this call so later lenses in the same
+        observation can consume fresh topology.  Candidate activity, emitted
+        keys and M_prev changes accumulate until finalize_step(), which advances
+        each of the eight category homeostats exactly once.
         """
+        # Anti-phase figure-ground repulsion is not an ordinal depth claim.
+        # Keep it in MATERIAL's signed relation lane so OCCLUSION remains
+        # strictly directed near -> far with sign +1.
+        if edge_type == EdgeType.OCCLUSION:
+            repulsion, ordinal = [], []
+            for cand in candidates:
+                ep = cand[4] if len(cand) > 4 else None
+                if int(getattr(ep, "sign", 1) or 1) < 0:
+                    repulsion.append(cand)
+                else:
+                    ordinal.append(cand)
+            if repulsion:
+                self._process_channel(EdgeType.MATERIAL, repulsion)
+            candidates = ordinal
+
         state = self.channels[edge_type]
+        acc = self._channel_step[edge_type]
         self.diagnostics["candidates_by_type"][edge_type.name] += len(candidates)
 
-        # [SPEC DIVERGENCE] Homeostasis runs on every step, including
-        # empty-candidate and zero-signal steps. Previously the method
-        # returned early in both cases, which froze theta at its initial
-        # value whenever a channel was silent on the tabletop,
-        # which produces candidates on <5% of steps). The spec §2.7 requires r_channel_bar to be an
-        # EMA of emission rate — an EMA that never observes silence
-        # cannot adapt to it. Silent steps now contribute r = 0, driving
-        # theta toward the floor so weak-but-real candidates can fire.
-        emitted = 0
-        if candidates:
-            # D1: cap by signal using heapq.nlargest (O(N log K)).
-            if len(candidates) > self.MAX_CANDIDATES_PER_CHANNEL:
-                self.diagnostics["candidate_cap_hits"][edge_type.name] += 1
-                candidates = nlargest(
-                    self.MAX_CANDIDATES_PER_CHANNEL,
-                    candidates,
-                    key=lambda c: (c[2], _neg_bytes(c[3])),
-                )
+        if len(candidates) > self.MAX_CANDIDATES_PER_CHANNEL:
+            self.diagnostics["candidate_cap_hits"][edge_type.name] += 1
+            candidates = nlargest(
+                self.MAX_CANDIDATES_PER_CHANNEL,
+                candidates,
+                key=lambda c: (c[2], _neg_bytes(c[3])),
+            )
 
-            max_sig = max(c[2] for c in candidates)
-        else:
-            max_sig = 0.0
-
-        # [SDRSEQ PROBE] Record the "nothing to emit" state explicitly so a
-        # silent channel is distinguishable from an all-rejected one. See
-        # the counter's rationale in __init__.
+        max_sig = max((float(c[2]) for c in candidates), default=0.0)
         if max_sig <= 0.0:
-            self.diagnostics["empty_or_zero_signal_by_type"][
-                edge_type.name
-            ] += 1
+            self.diagnostics["empty_or_zero_signal_by_type"][edge_type.name] += 1
+            return
 
-        passing: List[Tuple[int, int, float, bytes]] = []
-        if max_sig > 0.0:
-
-            theta_eff = clamp(
-                state["theta"]
-                - P.ETA_CTX_CHANNEL * state["C"]
-                + P.ETA_FAT_CHANNEL * state["F"],
-                P.THETA_ACT_FLOOR,
-                P.THETA_ACT_MAX,
-            )
-
-            M_prev: Dict[bytes, int] = state["M_prev"]
-            for cand in candidates:
-                src, dst, signal, key = cand[0], cand[1], cand[2], cand[3]
-                ep = cand[4] if len(cand) > 4 else None
-                key_b = _candidate_key_bytes(key)
-                norm_sig = signal / max_sig
-                prev = M_prev.get(key_b, 0)
-                if self._first_step:
-                    threshold = theta_eff
-                else:
-                    threshold = (
-                        theta_eff + P.DELTA_CHANNEL_HYST * (1 - 2 * prev)
-                    )
-                if norm_sig >= threshold:
-                    passing.append((src, dst, signal, key_b, ep))
-
-            # Emit passing edges. Preserve direction for directed types;
-            # canonicalize (min, max) for undirected types.
-            for src, dst, signal, _key_b, ep in passing:
-                if src == dst and edge_type not in SELF_BINDER_TYPES:
-                    continue
-                if edge_type in UNDIRECTED_EDGE_TYPES:
-                    a, b = (src, dst) if src < dst else (dst, src)
-                else:
-                    a, b = src, dst
-                self.cg.upsert_edge(a, b, edge_type, signal, self.t, params=ep)
-
-            emitted = len(passing)
-            self.diagnostics["emitted_by_type"][edge_type.name] += emitted
-            self.diagnostics["dropped_below_threshold"][edge_type.name] += (
-                len(candidates) - emitted
-            )
-
-            # D10 + [v8] Retain M_prev across steps, updated in
-            # place. Eviction is LRU on `last_seen` (mirrors
-            passing_keys = {p[3] for p in passing}
-            last_seen: Dict[bytes, int] = state["last_seen"]
-            new_M_prev = dict(M_prev)
-            for cand in candidates:
-                key = cand[3]
-                key_b = _candidate_key_bytes(key)
-                new_M_prev[key_b] = 1 if key_b in passing_keys else 0
-                last_seen[key_b] = self.t
-            if len(new_M_prev) > self.MAX_M_PREV_SIZE:
-                to_drop = len(new_M_prev) - (self.MAX_M_PREV_SIZE // 2)
-                ordered = sorted(
-                    new_M_prev.keys(),
-                    key=lambda k: (last_seen.get(k, -1), k),
-                )
-                for k in ordered[:to_drop]:
-                    new_M_prev.pop(k, None)
-                    last_seen.pop(k, None)
-            state["M_prev"] = new_M_prev
-
-        # Homeostatic update runs unconditionally (see divergence note above).
-        N_active = len(candidates)
-        r = emitted / (N_active + EPSILON) if N_active > 0 else 0.0
-        state["r_bar"] = (
-            (1.0 - P.KAPPA_R_CHANNEL) * state["r_bar"]
-            + P.KAPPA_R_CHANNEL * r
-        )
-        state["theta"] = clamp(
+        theta_eff = clamp(
             state["theta"]
-            + P.KAPPA_CHANNEL_THETA * (state["r_bar"] - P.RHO_CHANNEL_TARGET),
-            P.THETA_CHANNEL_MIN,
-            P.THETA_CHANNEL_MAX,
+            - P.ETA_CTX_CHANNEL * state["C"]
+            + P.ETA_FAT_CHANNEL * state["F"],
+            P.THETA_ACT_FLOOR,
+            P.THETA_ACT_MAX,
         )
-        had_emission = 1.0 if emitted > 0 else 0.0
-        state["C"] = (1.0 - P.KAPPA_C_CHANNEL) * state[
-            "C"
-        ] + P.KAPPA_C_CHANNEL * had_emission
-        state["F"] = (
-            P.BETA_F_CHANNEL * state["F"] + (1.0 - P.BETA_F_CHANNEL) * had_emission
-        )
+        passing = []
+        for cand in candidates:
+            src, dst, signal, key = cand[0], cand[1], float(cand[2]), cand[3]
+            params = cand[4] if len(cand) > 4 else None
+            if (edge_type in UNDIRECTED_EDGE_TYPES and isinstance(key, tuple)
+                    and len(key) >= 2 and isinstance(key[0], int)
+                    and isinstance(key[1], int) and key[0] > key[1]):
+                key = (key[1], key[0]) + key[2:]
+            key_b = _candidate_key_bytes(key)
+            norm_sig = signal / max_sig
+            # Hysteresis always reads the prior STEP's committed bit; a
+            # sibling tier pass in this step must not change its own gate.
+            prev = state["M_prev"].get(key_b, 0)
+            threshold = theta_eff if self._first_step else (
+                theta_eff + P.DELTA_CHANNEL_HYST * (1 - 2 * int(bool(prev)))
+            )
+            keep = norm_sig >= threshold
+            acc["active"].add(key_b)
+            acc["last_seen"][key_b] = int(self.t)
+            acc["m_prev"][key_b] = max(
+                int(bool(acc["m_prev"].get(key_b, 0))), int(keep)
+            )
+            if keep:
+                passing.append((src, dst, signal, key_b, params))
 
-    # -------------------------------------------------------------------------
-    # Pattern history (D9)
-    # -------------------------------------------------------------------------
-
-    def _update_pattern_history(self, dets: Tuple[Detection, ...]) -> None:
-        """Update per-pattern presence, onset, and per-anchor change state."""
-        present_now: Set[Tuple[str, bytes]] = set()
-        anchor_patterns_now: Dict[Any, Set[Tuple[str, bytes]]] = defaultdict(set)
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            present_now.add(pat)
-            anchor_patterns_now[d.alpha].add(pat)
-            self._pattern_last_seen[pat] = self.t
-            self._pattern_anchors[pat].add(d.alpha)
-
-        onset_now = present_now - self._pattern_present_prev
-        self._pattern_onset_now = onset_now
-        for pat in sorted(onset_now):
-            self._pattern_last_onset[pat] = self.t
-
-        # Extend per-pattern sliding-window history.
-        all_patterns = set(self._pattern_history.keys()) | present_now
-        W = P.W_HISTORY
-        for pat in sorted(all_patterns):
-            hist = self._pattern_history[pat]
-            hist.append(1 if pat in present_now else 0)
-            if len(hist) > W:
-                hist.pop(0)
-
-        # Per-anchor pattern-set change EMA (for Persistence).
-        all_anchors = set(self._anchor_pattern_set_prev.keys()) | set(
-            anchor_patterns_now.keys()
-        )
-        beta = P.PRESENCE_EMA_BETA
-        for anchor in all_anchors:
-            prev_set = self._anchor_pattern_set_prev.get(anchor)
-            curr_set = frozenset(anchor_patterns_now.get(anchor, set()))
-            if prev_set is not None:
-                change = float(len(prev_set ^ curr_set))
-                self._anchor_change_ema[anchor] = (
-                    beta * self._anchor_change_ema[anchor] + (1.0 - beta) * change
-                )
-            else:
-                self._anchor_change_ema[anchor] = 0.0
-            self._anchor_pattern_set_prev[anchor] = curr_set
-
-        # Prune pattern state older than 2 * W_HISTORY.
-        cutoff = self.t - 2 * W
-        stale = [
-            p
-            for p, last in self._pattern_last_seen.items()
-            if last < cutoff and p not in present_now
-        ]
-        for pat in sorted(stale):
-            self._pattern_history.pop(pat, None)
-            self._pattern_last_onset.pop(pat, None)
-            self._pattern_last_seen.pop(pat, None)
-            self._pattern_anchors.pop(pat, None)
-
-        # Prune anchor change state for anchors absent a long time.
-        stale_anchors = [
-            a
-            for a, s in self._anchor_pattern_set_prev.items()
-            if not s and self._anchor_change_ema.get(a, 0.0) < 1e-6
-        ]
-        for a in stale_anchors:
-            self._anchor_pattern_set_prev.pop(a, None)
-            self._anchor_change_ema.pop(a, None)
-
-    # -------------------------------------------------------------------------
-    # Co-activation (undirected)
-    # -------------------------------------------------------------------------
-
-    def _run_co_activation(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        # [P2-5] Semantic change: emit CO_ACTIVATION only for pairs where at
-        # least one endpoint is a fresh onset this step (0→1 transition).
-        # Steady-state co-presence is uninformative: two patterns present
-        # for 100 steps co-activate 100 times without new information.
-        # The informative signal is "started happening together."
-        #
-        # P is bounded by distinct detections per step (<50 in practice).
-        # Precompute signature hashes once per detection — avoids O(P²)
-        # hash_128(serialize(sig)) calls inside the pair loop.
-        if getattr(self, "_static_frame", False):
-            return
-        onset_pats = self._pattern_onset_now
-
-        det_data = []
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            det_data.append((d, pat, node_ids[d]))
-
-        candidates = []
-        steady_pairs = 0
-        for i in range(len(det_data)):
-            d1, p1, src = det_data[i]
-            for j in range(i + 1, len(det_data)):
-                d2, p2, dst = det_data[j]
-                if d1.k == d2.k and d1.sigma == d2.sigma:
-                    continue
-                if p1 not in onset_pats and p2 not in onset_pats:
-                    steady_pairs += 1
-                    continue
-                if src == dst:
-                    continue
+        n_emitted = 0
+        new_emitted_keys = set()
+        for src, dst, signal, key_b, params in passing:
+            if src == dst and edge_type not in SELF_BINDER_TYPES:
+                continue
+            if edge_type in UNDIRECTED_EDGE_TYPES:
                 a, b = (src, dst) if src < dst else (dst, src)
-                candidates.append((a, b, 1.0, (a, b)))
-        self.diagnostics["co_activation_steady_pairs_skipped"] += steady_pairs
-        self._process_channel(EdgeType.CO_ACTIVATION, candidates)
+            else:
+                a, b = src, dst
+            canonical = self._canonical_edge_params(edge_type, params, signal, a, b)
+            self.cg.upsert_edge(a, b, edge_type, signal, self.t, params=canonical)
+            n_emitted += 1
+            new_emitted_keys.add(key_b)
 
-    # -------------------------------------------------------------------------
-    # Transition (directed) — §1.12
-    # -------------------------------------------------------------------------
-
-    def _run_transition(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        """Signal = 1 iff parent onset at t-1 and child onset at t."""
-        if not self._pattern_onset_prev or not self._pattern_onset_now:
-            return
-
-        # Map current-onset patterns to node ids.
-        current_node: Dict[Tuple[str, bytes], int] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat in self._pattern_onset_now and pat not in current_node:
-                current_node[pat] = node_ids[d]
-
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for p_pat in sorted(self._pattern_onset_prev):
-            src = self.cg.get_or_create_pattern_node(p_pat[0], p_pat[1])
-            for c_pat, dst in current_node.items():
-                if p_pat == c_pat:
-                    continue
-                if src == dst:
-                    continue
-                # Directed: src=parent, dst=child.
-                candidates.append((src, dst, 1.0, (src, dst)))
-        self._process_channel(EdgeType.TRANSITION, candidates)
+        acc["emitted"].update(new_emitted_keys)
+        self.diagnostics["emitted_by_type"][edge_type.name] += n_emitted
+        self.diagnostics["dropped_below_threshold"][edge_type.name] += (
+            len(candidates) - len(passing)
+        )
 
     # -------------------------------------------------------------------------
     # Co-motion (undirected) — D6
@@ -4216,11 +4308,11 @@ class Binder:
                 if src == dst:
                     continue
                 a_id, b_id = (src, dst) if src < dst else (dst, src)
-                # [Pass 22] First real EdgeParams for CO_MOTION. Common fate
-                # in MT is direction- AND speed-tuned, so a single normalised
-                # dot product (which collapses toward cos_sim alone)
-                # under-describes the relation. na / nb are the per-pair
-                # speeds, already computed and finite-checked above.
+                # Common-fate measurements retain the legacy
+                # EDGE_CO_MOTION writer key but canonicalize into MATERIAL.
+                # MT common fate is direction- and speed-tuned, so a single
+                # normalised dot product under-describes the relation. na / nb
+                # are the finite-checked per-pair speeds.
                 V = max(P.MOTION_SPEED_MAX, 1e-6)
                 speed_bin = _bin8(math.log2(max(0.5 * (na + nb), V * 2.0 ** -6) / V), -6.0, 0.0)
                 lead = va if na >= nb else vb
@@ -4243,171 +4335,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
-        self._process_channel(EdgeType.CO_MOTION, candidates)
-
-    # -------------------------------------------------------------------------
-    # Contrast (directed) — D3
-    # -------------------------------------------------------------------------
-
-    def _run_contrast(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        # Distinct patterns present this step.
-        patterns: Dict[Tuple[str, bytes], Detection] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat not in patterns:
-                patterns[pat] = d
-        if len(patterns) < 2:
-            return
-
-        pattern_keys = sorted(patterns.keys(), key=lambda k: (k[0], k[1]))
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        min_obs = P.CONTRAST_MIN_OBS
-
-        for i in range(len(pattern_keys)):
-            for j in range(len(pattern_keys)):
-                if i == j:
-                    continue
-                ka = pattern_keys[i]  # cause
-                kb = pattern_keys[j]  # effect
-                hist_a = self._pattern_history.get(ka)
-                hist_b = self._pattern_history.get(kb)
-                if not hist_a or not hist_b:
-                    continue
-
-                p_b_given_a, n_a = _conditional_from_history(
-                    hist_a, hist_b, condition_on_a_present=True
-                )
-                p_b_given_not_a, n_not_a = _conditional_from_history(
-                    hist_a, hist_b, condition_on_a_present=False
-                )
-                if n_a + n_not_a < min_obs:
-                    continue
-
-                delta = p_b_given_a - p_b_given_not_a
-                signal = 0.5 * (1.0 + math.tanh(2.0 * delta))
-                if signal <= 0.0:
-                    continue
-                da = patterns[ka]
-                db = patterns[kb]
-                src = node_ids[da]
-                dst = node_ids[db]
-                if src == dst:
-                    continue
-                # Directed: cause -> effect.
-                candidates.append((src, dst, signal, (src, dst)))
-        self._process_channel(EdgeType.CONTRAST, candidates)
-
-    # -------------------------------------------------------------------------
-    # Periodicity (undirected) — D3, D7
-    # -------------------------------------------------------------------------
-
-    def _run_periodicity(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        patterns: Dict[Tuple[str, bytes], Detection] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat not in patterns:
-                patterns[pat] = d
-        if len(patterns) < 2:
-            return
-
-        # Compute interval statistics per pattern from onset transitions.
-        sigs: Dict[Tuple[str, bytes], Tuple[float, float]] = {}
-        for pat, hist in sorted(self._pattern_history.items()):
-            stats = _pattern_intervals(hist)
-            if stats is not None:
-                sigs[pat] = stats
-
-        if len(sigs) < 2:
-            return
-
-        pattern_keys = sorted(sigs.keys(), key=lambda k: (k[0], k[1]))
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for i in range(len(pattern_keys)):
-            for j in range(i + 1, len(pattern_keys)):
-                ka = pattern_keys[i]
-                kb = pattern_keys[j]
-                mean_a, std_a = sigs[ka]
-                mean_b, std_b = sigs[kb]
-                if mean_a <= 0.0 or mean_b <= 0.0:
-                    continue
-                reg_a = 1.0 - clamp(std_a / (mean_a + EPSILON), 0.0, 1.0)
-                reg_b = 1.0 - clamp(std_b / (mean_b + EPSILON), 0.0, 1.0)
-                ratio = mean_a / mean_b if mean_a >= mean_b else mean_b / mean_a
-                commensurate = _commensurability(ratio)
-                signal = 0.5 * (reg_a + reg_b) * commensurate
-                if signal <= 0.0:
-                    continue
-                da = patterns.get(ka)
-                db = patterns.get(kb)
-                if da is None or db is None:
-                    continue
-                src = node_ids[da]
-                dst = node_ids[db]
-                if src == dst:
-                    continue
-                a_id, b_id = (src, dst) if src < dst else (dst, src)
-                candidates.append((a_id, b_id, signal, (a_id, b_id)))
-        self._process_channel(EdgeType.PERIODICITY, candidates)
-
-    # -------------------------------------------------------------------------
-    # Persistence (directed) — D3, D8
-    # -------------------------------------------------------------------------
-
-    def _run_persistence(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        """A stable while B changes. Stability = presence fraction of A.
-        Change = mean anchor pattern-set change EMA over B's anchors."""
-        patterns: Dict[Tuple[str, bytes], Detection] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat not in patterns:
-                patterns[pat] = d
-        if len(patterns) < 2:
-            return
-
-        pattern_keys = sorted(patterns.keys(), key=lambda k: (k[0], k[1]))
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        threshold = P.PERSISTENCE_CHANGE_THRESHOLD
-
-        for i in range(len(pattern_keys)):
-            for j in range(len(pattern_keys)):
-                if i == j:
-                    continue
-                ka = pattern_keys[i]  # stable side
-                kb = pattern_keys[j]  # changing side
-
-                hist_a = self._pattern_history.get(ka)
-                if not hist_a:
-                    continue
-                stab_a = _presence_fraction(hist_a)
-                if stab_a < 0.5:
-                    continue
-
-                b_anchors = self._pattern_anchors.get(kb, set())
-                if not b_anchors:
-                    continue
-                changes = [self._anchor_change_ema.get(a, 0.0) for a in b_anchors]
-                mean_change = sum(changes) / len(changes)
-                if mean_change < threshold:
-                    continue
-
-                signal = stab_a * clamp(mean_change, 0.0, 1.0)
-                if signal <= 0.0:
-                    continue
-                da = patterns[ka]
-                db = patterns[kb]
-                src = node_ids[da]
-                dst = node_ids[db]
-                if src == dst:
-                    continue
-                # Directed: stable -> changing.
-                candidates.append((src, dst, signal, (src, dst)))
-        self._process_channel(EdgeType.PERSISTENCE, candidates)
+        self._process_channel(EdgeType.MATERIAL, candidates)
 
     # -------------------------------------------------------------------------
     # Topology (directed) — D6
@@ -4473,7 +4401,7 @@ class Binder:
             if not self._is_structural_anchor(a):
                 continue
             pa = anchor_positions[a]
-            if len(pa) < 3 or not all(math.isfinite(x) for x in pa[:3]):
+            if len(pa) < 2 or not all(math.isfinite(x) for x in pa[:3]):
                 continue
             dists: List[Tuple[float, Any]] = []
             for b in anchors:
@@ -4482,9 +4410,9 @@ class Binder:
                 if not self._is_structural_anchor(b):
                     continue
                 pb = anchor_positions[b]
-                if len(pb) < 3 or not all(math.isfinite(x) for x in pb[:3]):
+                if len(pb) < 2 or not all(math.isfinite(x) for x in pb[:3]):
                     continue
-                d_ab = math.sqrt(sum((x - y) ** 2 for x, y in zip(pa[:3], pb[:3])))
+                d_ab = _pos_dist(pa[:3], pb[:3])
                 if math.isfinite(d_ab):
                     dists.append((d_ab, b))
             dists.sort(key=lambda t: (t[0], serialize_value(t[1])))
@@ -4497,7 +4425,7 @@ class Binder:
                     continue
                 # Directed: A -> B means B is one of A's K-nearest.
                 candidates.append((src, dst, signal, (src, dst)))
-        self._process_channel(EdgeType.TOPOLOGY, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     # -------------------------------------------------------------------------
     # Degree (undirected) — D6
@@ -4538,13 +4466,13 @@ class Binder:
                     continue
                 pa = anchor_positions[a]
                 pb = anchor_positions[b]
-                if len(pa) < 3 or len(pb) < 3:
+                if len(pa) < 2 or len(pb) < 2:
                     continue
                 if not all(math.isfinite(x) for x in pa[:3]):
                     continue
                 if not all(math.isfinite(x) for x in pb[:3]):
                     continue
-                d_ab = math.sqrt(sum((x - y) ** 2 for x, y in zip(pa[:3], pb[:3])))
+                d_ab = _pos_dist(pa[:3], pb[:3])
                 if not math.isfinite(d_ab) or d_ab > radius:
                     continue
                 src = node_ids[rep_by_anchor[a]]
@@ -4557,7 +4485,7 @@ class Binder:
                 if signal <= 0.0:
                     signal = 1e-6
                 candidates.append((a_id, b_id, signal, (a_id, b_id)))
-        self._process_channel(EdgeType.DEGREE, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     # -------------------------------------------------------------------------
     # Contact (undirected) — D6
@@ -4656,10 +4584,10 @@ class Binder:
                 for signal, _key, idx in rows[:cap]:
                     keep_idx.add(idx)
             candidates = [c for i, c in enumerate(candidates) if i in keep_idx]
-        self._process_channel(EdgeType.CONTACT, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     # -------------------------------------------------------------------------
-    # Stream Binding (PART_CONTENT) — Stage 1.2
+    # Stream Binding (contour-surface contact) — Stage 1.2
     # -------------------------------------------------------------------------
 
     def _run_stream_binding(
@@ -4667,8 +4595,7 @@ class Binder:
         dets: Tuple[Detection, ...],
         node_ids: Dict[Detection, int],
     ) -> None:
-        """Emits PART_CONTENT edges binding surface hypercolumn content (Color/Texture)
-        to contours whose polylines pass through the hypercolumn RF."""
+        """Emit symmetric SURFACE contacts between contour and surface anchors."""
         if not self._contour_surface_contacts:
             return
 
@@ -4701,116 +4628,7 @@ class Binder:
             )
             candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.REGION_CONTENT, candidates)
-
-    # -------------------------------------------------------------------------
-    # Sequence (directed) — D9
-    # -------------------------------------------------------------------------
-
-    def _run_sequence(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        """Signal = exp(-eta_seq_age * lag) for parent onset within W_SEQ
-        steps before a child onset at the current step."""
-        if not self._pattern_onset_now:
-            return
-
-        # Current-onset patterns and their node IDs.
-        current_node: Dict[Tuple[str, bytes], int] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat in self._pattern_onset_now and pat not in current_node:
-                current_node[pat] = node_ids[d]
-
-        # Parent candidates: any pattern whose onset was within W_SEQ steps
-        # before now, excluding the current step (lag must be > 0).
-        lag_max = P.W_SEQ
-        candidate_parents: List[Tuple[Tuple[str, bytes], int]] = []
-        for pat, onset_t in sorted(self._pattern_last_onset.items()):
-            lag = self.t - onset_t
-            if 0 < lag <= lag_max and pat not in current_node:
-                candidate_parents.append((pat, lag))
-
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for p_pat, lag in candidate_parents:
-            src = self.cg.get_or_create_pattern_node(p_pat[0], p_pat[1])
-            signal = math.exp(-P.ETA_SEQ_AGE * float(lag))
-            for c_pat, dst in current_node.items():
-                if p_pat == c_pat:
-                    continue
-                if src == dst:
-                    continue
-                candidates.append((src, dst, signal, (src, dst)))
-        self._process_channel(EdgeType.SEQUENCE, candidates)
-
-    # -------------------------------------------------------------------------
-    # Synchrony (undirected) — P2-2
-    # -------------------------------------------------------------------------
-
-    def _synchrony_signal(
-        self, ka: Tuple[str, bytes], kb: Tuple[str, bytes]
-    ) -> float:
-        """[P2-2] Phase-lock signal between two patterns' onset histories.
-
-        Over the shared trailing window W = min(len(a), len(b), W_SYNC),
-        locate 0->1 onset transitions in each presence history. For every
-        A onset, lag = distance to the nearest B onset. Consistency =
-        (mode_count - 1) / (n_lags - 1): 1.0 when all lags equal the modal
-        lag (perfect phase lock), lower as lags scatter. Requires W >= 4
-        and >= 2 onsets per pattern; otherwise 0.0.
-        """
-        hist_a = self._pattern_history.get(ka)
-        hist_b = self._pattern_history.get(kb)
-        if not hist_a or not hist_b:
-            return 0.0
-        W = min(len(hist_a), len(hist_b), P.W_SYNC)
-        if W < 4:
-            return 0.0
-        a_w = hist_a[-W:]
-        b_w = hist_b[-W:]
-        onsets_a = [i for i in range(1, W) if a_w[i] == 1 and a_w[i - 1] == 0]
-        onsets_b = [i for i in range(1, W) if b_w[i] == 1 and b_w[i - 1] == 0]
-        if len(onsets_a) < 2 or len(onsets_b) < 2:
-            return 0.0
-        lags = [min(abs(ob - oa) for ob in onsets_b) for oa in onsets_a]
-
-        counts = Counter(lags)
-        mode_count = max(counts.values())
-        phase_consistency = (mode_count - 1) / (len(lags) - 1)
-        return clamp(phase_consistency, 0.0, 1.0)
-
-    def _run_synchrony(
-        self, dets: Tuple[Detection, ...], node_ids: Dict[Detection, int]
-    ) -> None:
-        """[P2-2] Emit SYNCHRONY edges between current-frame patterns whose
-        onset histories are phase-locked over the trailing W_SYNC window."""
-        if getattr(self, "_static_frame", False):
-            return
-        if not self._pattern_onset_now:
-            return
-
-        patterns: Dict[Tuple[str, bytes], Detection] = {}
-        for d in dets:
-            pat = (d.k, _node_signature_hash(d.sigma))
-            if pat not in patterns:
-                patterns[pat] = d
-
-        pattern_keys = sorted(patterns.keys(), key=lambda k: (k[0], k[1]))
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for i in range(len(pattern_keys)):
-            for j in range(i + 1, len(pattern_keys)):
-                ka = pattern_keys[i]
-                kb = pattern_keys[j]
-                signal = self._synchrony_signal(ka, kb)
-                if signal <= 0.0:
-                    continue
-                src = node_ids[patterns[ka]]
-                dst = node_ids[patterns[kb]]
-                if src == dst:
-                    continue
-                a_id, b_id = (src, dst) if src < dst else (dst, src)
-                candidates.append((a_id, b_id, signal, (a_id, b_id)))
-        self._process_channel(EdgeType.SYNCHRONY, candidates)
+        self._process_channel(EdgeType.SURFACE, candidates)
 
     def _run_orientation_continuity(
         self,
@@ -4967,7 +4785,7 @@ class Binder:
                 confidence=float(clamp(signal, 0.0, 1.0)),
             )
             candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
-        self._process_channel(EdgeType.ORIENTATION_CONTINUITY, candidates)
+        self._process_channel(EdgeType.CONTINUITY, candidates)
 
     def _run_surface_grouping(
         self,
@@ -5092,7 +4910,7 @@ class Binder:
             sigs = [c[2] for c in raw]
             if max(sigs) - min(sigs) < P.SURFACE_GROUPING_SPREAD_MIN:
                 return
-        self._process_channel(EdgeType.SURFACE_GROUPING, raw)
+        self._process_channel(EdgeType.SURFACE, raw)
 
     # -------------------------------------------------------------------------
     def _run_curvature(
@@ -5224,7 +5042,7 @@ class Binder:
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
-        self._process_channel(EdgeType.CURVATURE, candidates)
+        self._process_channel(EdgeType.SHAPE, candidates)
 
     def _bo_depth_constraints(self, dets):
         """[Stage 3] Border-ownership ordinal depth constraints.
@@ -5314,7 +5132,7 @@ class Binder:
                     "EDGE_OCCLUSION",
                     {"depth": gap_bin, "stack_depth": stack_bin, "source": 0.0,
                      "depth_units": None},
-                    sign=-1,
+                    sign=1,
                     confidence=float(clamp(conf, 0.0, 1.0)),
                 )
                 candidates.append((s_, d_, conf, (s_, d_), ep))
@@ -5363,7 +5181,7 @@ class Binder:
                         {"depth": 0.0, "stack_depth": 8.0, "source": 1.0,
                          "depth_units": dz / max(
                              P.OCCLUSION_3D_SIGMA_DEPTH * 2.0, 1.0)},
-                        sign=-1,
+                        sign=1,
                         confidence=float(clamp(signal, 0.0, 1.0)),
                     )
                     candidates.append((src, dst, signal, (src, dst), ep))
@@ -5451,7 +5269,7 @@ class Binder:
                         confidence=float(clamp(signal, 0.0, 1.0)),
                     )
                     candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
-        self._process_channel(EdgeType.CO_LOCATED, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     # -------------------------------------------------------------------------
     # v32: Orientation angle relations
@@ -5467,7 +5285,7 @@ class Binder:
         whose angle difference lies in [30°, 60°)."""
         self._run_orientation_angle_relation(
             dets, node_ids, anchor_positions,
-            edge_type=EdgeType.ORIENTATION_BEND,
+            edge_type=EdgeType.JUNCTION,
             angle_min=math.pi / 6.0,
             angle_max=math.pi / 3.0,
             angle_center=math.pi / 4.0,
@@ -5485,7 +5303,7 @@ class Binder:
         because d_theta saturates at π/2 after wrapping."""
         self._run_orientation_angle_relation(
             dets, node_ids, anchor_positions,
-            edge_type=EdgeType.ORIENTATION_JUNCTION,
+            edge_type=EdgeType.JUNCTION,
             angle_min=math.pi / 3.0,
             angle_max=math.pi / 2.0,
             angle_center=5.0 * math.pi / 12.0,
@@ -5604,13 +5422,19 @@ class Binder:
                 a_id, b_id = (src, dst) if src < dst else (dst, src)
                 cls_name = (
                     "EDGE_ORIENTATION_BEND"
-                    if edge_type == EdgeType.ORIENTATION_BEND
+                    if edge_type == EdgeType.JUNCTION
                     else "EDGE_ORIENTATION_JUNCTION"
                 )
                 # [P2] THE NAMED WRITER: the AXIAL ANGLE DIFFERENCE in
                 # RADIANS, the BISECTOR ORIENTATION in RADIANS (axial) and
                 # the separation in WAVELENGTHS.
-                bisector_theta = ((theta_a + theta_b) / 2.0) % math.pi
+                bisector_theta = (
+                    0.5
+                    * math.atan2(
+                        math.sin(2.0 * theta_a) + math.sin(2.0 * theta_b),
+                        math.cos(2.0 * theta_a) + math.cos(2.0 * theta_b),
+                    )
+                ) % math.pi
                 dist_w = dist / max(self._step_extraction_scale, 1e-6)
                 ep = _edge_params(
                     cls_name,
@@ -5671,65 +5495,3 @@ def _neg_bytes(key: Tuple[Any, ...]) -> bytes:
     """Deterministic inverse key for heapq.nlargest tie-breaking by
     canonical bytes (lower bytes should win, so nlargest sees higher)."""
     return bytes(255 - b for b in _candidate_key_bytes(key))
-
-
-def _conditional_from_history(
-    hist_a: List[int],
-    hist_b: List[int],
-    condition_on_a_present: bool,
-) -> Tuple[float, int]:
-    """Return (P(B=1 | A=X), observations), where X is 1 or 0 depending on
-    condition_on_a_present. Both histories are sliding windows of the same
-    length."""
-    T = min(len(hist_a), len(hist_b))
-    if T == 0:
-        return 0.0, 0
-    n_hits = 0
-    n_obs = 0
-    for i in range(T):
-        a_val = hist_a[i]
-        b_val = hist_b[i]
-        if condition_on_a_present:
-            if a_val == 0:
-                continue
-        else:
-            if a_val == 1:
-                continue
-        n_obs += 1
-        n_hits += b_val
-    if n_obs == 0:
-        return 0.0, 0
-    return n_hits / n_obs, n_obs
-
-
-def _presence_fraction(hist: List[int]) -> float:
-    if not hist:
-        return 0.0
-    return sum(hist) / len(hist)
-
-
-def _pattern_intervals(hist: List[int]) -> Optional[Tuple[float, float]]:
-    """Extract (mean, std) of inter-onset intervals from a presence history."""
-    if len(hist) < 2:
-        return None
-    onsets: List[int] = []
-    for i in range(1, len(hist)):
-        if hist[i] == 1 and hist[i - 1] == 0:
-            onsets.append(i)
-    if len(onsets) < 2:
-        return None
-    intervals = [onsets[i + 1] - onsets[i] for i in range(len(onsets) - 1)]
-    if not intervals:
-        return None
-    mean_i = sum(intervals) / len(intervals)
-    var_i = sum((x - mean_i) ** 2 for x in intervals) / len(intervals)
-    return mean_i, math.sqrt(max(0.0, var_i))
-
-
-def _commensurability(ratio: float) -> float:
-    """Score in [0, 1]; 1 = ratio near an integer."""
-    if ratio <= 0.0:
-        return 0.0
-    nearest_int = max(1, round(ratio))
-    deviation = abs(ratio - nearest_int) / max(1.0, nearest_int)
-    return clamp(1.0 - deviation, 0.0, 1.0)

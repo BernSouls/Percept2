@@ -182,7 +182,7 @@ def _grow(fit, cx, cy, kind, order, xs, ys, th, max_tan=math.pi):
     tall = np.arctan2(ys - cy, xs - cx)
     pred, cth = _tangent_of_curve(fit["coef"], kind, order, tall)
     res = np.abs(rall - pred)
-    pk = th + math.pi / 2.0
+    pk = th
     dth = np.abs(((pk - cth + math.pi / 2.0) % math.pi) - math.pi / 2.0)
     m = (res <= EPS_R) & (dth <= max_tan)
     return sorted(int(i) for i in np.nonzero(m)[0])
@@ -200,6 +200,10 @@ def hypothesis(peaks: Sequence[Dict], xs: np.ndarray, ys: np.ndarray,
     if not (rad > 1.0):
         return None
     members = list(seed)
+    if len(members) < 5:
+        inl = np.nonzero(np.abs(np.hypot(xs - cx, ys - cy) - rad) <= EPS_R)[0]
+        if inl.size >= 5:
+            members = [int(v) for v in inl]
     fit = None
     for _ in range(iters):
         dx = xs[members] - cx
@@ -242,7 +246,7 @@ def _finalise(xs, ys, th, members, cx, cy, kind, order, fixed_scale):
     # squared tangent disagreement, in FIXED units (see SCALE_R / SCALE_T).
     s_r = SCALE_R if fixed_scale else max(
         float(np.median(res)) * 1.4826, 0.5)
-    peak_th = th[members] + math.pi / 2.0          # peaks carry edge NORMAL
+    peak_th = th[members]                          # peaks carry contour TANGENT
     dth = np.abs(((peak_th - curve_th + math.pi / 2.0) % math.pi)
                  - math.pi / 2.0)
     s_t = SCALE_T if fixed_scale else max(
@@ -271,7 +275,7 @@ def _finalise(xs, ys, th, members, cx, cy, kind, order, fixed_scale):
     tall = np.arctan2(ys - cy, xs - cx)
     pred_all, curve_th_all = _tangent_of_curve(fit["coef"], kind, order, tall)
     res_all = np.abs(rall - pred_all)
-    pk_all = th + math.pi / 2.0                    # peaks carry edge NORMAL
+    pk_all = th                                    # peaks carry contour TANGENT
     dth_all = np.abs(((pk_all - curve_th_all + math.pi / 2.0) % math.pi)
                      - math.pi / 2.0)
 
@@ -569,7 +573,7 @@ def trace_hypotheses(xs: np.ndarray, ys: np.ndarray, th: np.ndarray,
     for cx, cy in centres:
         phi = np.arctan2(ys - cy, xs - cx)
         rho = np.hypot(xs - cx, ys - cy)
-        radial = np.abs(np.cos(th - phi))
+        radial = np.abs(np.sin(th - phi))
         bidx = np.floor((phi + math.pi) / (2.0 * math.pi) * bins).astype(int) % bins
         cand: List[List[int]] = []
         bin_of: List[int] = []
@@ -584,9 +588,11 @@ def trace_hypotheses(xs: np.ndarray, ys: np.ndarray, th: np.ndarray,
         emit = [W_NORMAL * (1.0 - radial[c] ** 2) for c in cand]
 
         def run(start_choice: int):
-            # dp[j] = cost of best path ending at candidate j of the current bin
+            # dp[j] = cost of best path starting at start_choice in bin 0
+            # and ending at candidate j of the current bin.
             prev_idx = cand[0]
-            dp = emit[0].copy()
+            dp = np.full(len(cand[0]), np.inf, dtype=float)
+            dp[start_choice] = float(emit[0][start_choice])
             back: List[List[int]] = []
             for b in range(1, len(cand)):
                 cur_idx = cand[b]
@@ -736,5 +742,5 @@ def ring_hypotheses(peaks, xs, ys, th, seeds, kind="fourier", order=4,
                 break
         if not dup:
             out.append(h)
-    out.sort(key=lambda h: -h["llr"])
+    out.sort(key=lambda h: -h["llr_ev"])
     return out

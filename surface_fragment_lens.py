@@ -2,47 +2,35 @@
 
 WHAT THIS IS
 ------------
-Session B / B3.  ``perception.surface_fragments`` measures a SPARSE field of
-surface fragments: one 2.5D orientation estimate per anchored contour point,
-fused from the occluding-contour and shading cues on a shared (slant, tilt)
-grid.  This module turns those fragments into detections of the registered
-node class ``SURFACE_FRAGMENT`` (core/registries.py: four slots -- slant,
-tilt, curvature sign, confidence).
+``perception.surface_fragments`` measures a sparse field of 2.5D surface
+fragments from contour, shading, ownership and depth-layer cues. This module
+emits the registered ``SURFACE_FRAGMENT`` oriented signature when the fused
+normal population is measurable. A fragment with a measured ordinal depth
+layer but no usable normal gets a separate depth-only relation; it does not
+receive a fabricated slant, tilt, curvature or confidence value.
 
 THE IDENTITY CONTRACT
 ---------------------
-The identity of a SURFACE_FRAGMENT is CONTENT-KEYED.  ``alpha`` is the hash of
-the class, the relation and the four QUANTISED slot values -- nothing else:
+Identity is content-keyed. ``alpha`` hashes the class, relation and measured
+quantised slots, never image coordinates or graded population vectors.
+Fragments with identical content share an alpha; their positions remain in
+``positions[alpha]`` as a list. ``centroid_positions[alpha]`` is the explicit
+non-identity anchor supplied to spatial consumers.
 
-    * the image coordinates of the fragment are NOT in the identity, the
-      detection hash, or the golden contract;
-    * the graded population (the sub-bin tuning vectors) is NOT in the
-      identity either: ``TypedSignature`` already excludes it from its hash
-      and equality, and ``alpha`` is built from the bins alone.
+The image path is wired in ``Observation2D.from_image``: PeakLens and
+ChainLens produce the PEAK_CHAIN spine, ownership records and an image-fitted
+light prior feed ``build_surface_fragments``, calibrated cue sigmas are used,
+and ordinal depth layers are assigned before this emitter or Binder reads the
+fragments.
 
-Two fragments with identical content therefore produce the SAME identity, and
-their coordinates ride beside the detection in the lens' non-identity
-``positions`` map (one list per content identity).  This is the
-"presence + tolerance" reading of an assembly member: the content names the
-member, the coordinate says where the member was seen.
-
-WHY THE EMITTER IS STANDALONE (no pipeline wiring in this pass)
---------------------------------------------------------------
-Adding a lens to ``LENS_DECLARATION_BY_NAME`` / the declared lens order is a
-contract another session's pipeline depends on, so this pass ships the emitter
-with the interface documented but UNWIRED.  A future wiring session provides
-the fragments -- ``build_surface_fragments`` needs the ownership records, the
-raw luminance and the corpus light prior -- and either passes them explicitly,
-registers a ``fragment_source`` callable, or attaches them to the observation
-as ``observation.surface_fragments``.
-
-Nothing in this module reads a truth value, an object class, a mask or a
-fabricated constant.  Every slot is a measurement the cue populations already
-carry; a fragment with no usable cue ABSTAINS rather than emitting a default.
+Nothing here reads renderer truth, object labels or masks. An unmeasured normal
+is omitted; measured depth and material metadata may still be carried without
+inventing a normal.
 """
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from core.hashing import hash_64, serialize_float, serialize_tuple
@@ -180,6 +168,22 @@ def surface_fragment_signature(
     )
 
 
+def _depth_layer_signature(depth_layer: int) -> TypedSignature:
+    """Identity for a depth-only fragment with no measurable normal cue.
+
+    The relation is distinct from the oriented surface signature: it carries
+    an ordinal layer observation without inventing slant, tilt, curvature, or
+    confidence bins.
+    """
+    return TypedSignature(
+        kind="CANONICAL",
+        class_=SURFACE_FRAGMENT_CLASS,
+        relation="SURFACE_FRAGMENT_DEPTH_LAYER",
+        quantized=(float(int(depth_layer)),),
+        population=(),
+    )
+
+
 def surface_fragment_alpha(signature: TypedSignature) -> int:
     """The CONTENT identity of a fragment signature.
 
@@ -189,8 +193,8 @@ def surface_fragment_alpha(signature: TypedSignature) -> int:
     leaks into identity.
     """
     payload = serialize_tuple([
-        SURFACE_FRAGMENT_CLASS.encode("utf-8"),
-        SURFACE_FRAGMENT_RELATION.encode("utf-8"),
+        str(signature.class_).encode("utf-8"),
+        str(signature.relation).encode("utf-8"),
         serialize_tuple([serialize_float(float(v))
                          for v in signature.quantized]),
     ])
@@ -251,8 +255,8 @@ class SurfaceFragmentLens(HigherLens):
     Input resolution, in order:
       1. the ``fragments`` argument (a sequence of ``SurfaceFragment``);
       2. ``fragment_source()`` if it is a callable;
-      3. ``observation.surface_fragments`` (the documented interface: the
-         caller sets the attribute; no observation class is modified here).
+      3. ``observation.surface_fragments`` (also populated by
+         ``Observation2D.from_image``).
 
     No fragments -> no detections (a quiet scene, not an error).  The order is
     deterministic and independent of the input order: content key first,
@@ -267,6 +271,8 @@ class SurfaceFragmentLens(HigherLens):
         # NON-IDENTITY side channel: content alpha -> the image coordinates
         # that produced it this step.  Rebuilt every step; never hashed.
         self.positions: Dict[int, List[Tuple[float, float]]] = {}
+        self.centroid_positions: Dict[int, Tuple[float, float]] = {}
+        self.fragments_by_alpha: Dict[int, List[SurfaceFragment]] = {}
         # [B4] The same coordinates in the selected frame, in ENERGY RADII,
         # plus their polar address (r, theta).  Also NON-IDENTITY: the frame
         # bank and these coordinates are geometry, not signature content.
@@ -320,12 +326,33 @@ class SurfaceFragmentLens(HigherLens):
         **kwargs: Any,
     ) -> List[Detection]:
         self.positions = {}
+        self.centroid_positions = {}
+        self.fragments_by_alpha = {}
         self.coordinates = {}
         self.polar = {}
         self.frame_name = ""
         field = self.fragments_from(observation, fragments, fragment_source)
         if not field:
             return []
+
+        # Depth-only fragments can still carry a measured ordinal layer when
+        # their fused normal population abstains. Use the calibrated ownership
+        # probability already attached to that member as z; do not invent a
+        # surface normal or a default confidence.
+        owner_confidence: Dict[Any, float] = {}
+        for record in (getattr(observation, "fragment_ownership_records", ())
+                       or ()):
+            anchor = record.get("alpha")
+            try:
+                probability = float(record.get("owner_prob"))
+            except (TypeError, ValueError):
+                continue
+            if anchor is None or not math.isfinite(probability):
+                continue
+            confidence = max(0.0, min(1.0, 2.0 * abs(probability - 0.5)))
+            owner_confidence[anchor] = max(
+                confidence, owner_confidence.get(anchor, 0.0)
+            )
 
         # [B4] THE FRAME BANK.  One origin and one scale measured from the
         # observation's own field, then coordinates in ENERGY RADII.  The
@@ -341,20 +368,25 @@ class SurfaceFragmentLens(HigherLens):
         self.frame_name = frame.name if frame is not None else ""
 
         rows: List[Tuple[Tuple[float, ...], Tuple[float, float], float,
-                          TypedSignature]] = []
+                          TypedSignature, SurfaceFragment]] = []
         for fragment in field:
             if fragment.combined is None:
                 self._skipped_no_cue += 1
                 continue
             values = surface_fragment_values(fragment)
             signature = surface_fragment_signature(fragment)
-            if values is None or signature is None:
-                # A fused population exists but no slot could be measured
-                # (empty moment or a non-finite component): abstain.
-                self._skipped_non_finite += 1
-                continue
+            if signature is None:
+                if fragment.depth_layer is None:
+                    # No normal population and no ordinal layer: there is no
+                    # usable physical measurement to emit.
+                    self._skipped_non_finite += 1
+                    continue
+                signature = _depth_layer_signature(fragment.depth_layer)
+                confidence = owner_confidence.get(fragment.alpha, 0.0)
+            else:
+                confidence = float(values[3]) if values is not None else 0.0
             pos = (float(fragment.position[0]), float(fragment.position[1]))
-            rows.append((signature.quantized, pos, values[3], signature))
+            rows.append((signature.quantized, pos, confidence, signature, fragment))
 
         # Budget: keep the most concentrated populations, then restore the
         # content order so the OUTPUT does not depend on the confidence order.
@@ -364,21 +396,68 @@ class SurfaceFragmentLens(HigherLens):
             rows = rows[: self.max_fragments]
         rows.sort(key=lambda r: (r[0], r[1]))
 
-        seen: Dict[int, TypedSignature] = {}
+        selected: Dict[int, Tuple[TypedSignature, float]] = {}
         out: List[Detection] = []
-        for _bins, pos, confidence, signature in rows:
+        for _bins, pos, confidence, signature, fragment in rows:
             alpha = surface_fragment_alpha(signature)
             self.positions.setdefault(alpha, []).append(pos)
+            self.fragments_by_alpha.setdefault(alpha, []).append(fragment)
             if frame is not None:
                 self.coordinates.setdefault(alpha, []).append(
                     frame.to_local(pos))
                 self.polar.setdefault(alpha, []).append(frame.polar(pos))
-            if alpha in seen:
+            if alpha in selected:
                 self._collapsed += 1
-                continue
-            seen[alpha] = signature
-            out.append(_detection_from_signature(
-                signature, confidence, t, scale=scale))
+                old_sig, old_conf = selected[alpha]
+                selected[alpha] = (old_sig, max(old_conf, float(confidence)))
+            else:
+                selected[alpha] = (signature, float(confidence))
+
+        def _clean(value):
+            if value is None:
+                return None
+            value = float(value)
+            return value if math.isfinite(value) else None
+
+        for alpha in sorted(selected):
+            signature, confidence = selected[alpha]
+            fragments = self.fragments_by_alpha.get(alpha, [])
+            payloads = []
+            for fragment in fragments:
+                fragment_values = surface_fragment_values(fragment)
+                payloads.append((
+                    None if fragment.depth_layer is None else float(fragment.depth_layer),
+                    _clean(fragment.material_lum),
+                    _clean(fragment.material_hue),
+                    _clean(fragment.material_sat),
+                    _clean(fragment.material_tex),
+                    _clean(fragment.polarity),
+                    _clean(fragment.owner_side),
+                    _clean(fragment.curvature_sign),
+                    _clean(fragment_values[3] if fragment_values else None),
+                    _clean(owner_confidence.get(fragment.alpha)),
+                ))
+            payloads.sort(key=lambda row: tuple(
+                (value is None, 0.0 if value is None else float(value))
+                for value in row
+            ))
+            detection = _detection_from_signature(
+                signature, confidence, t, scale=scale)
+            detection = replace(
+                detection,
+                rho=(("surface_meta", tuple(payloads), 0, "+"),),
+            )
+            out.append(detection)
+
+        for alpha, pts in self.positions.items():
+            if pts:
+                centroid = (
+                    sum(p[0] for p in pts) / len(pts),
+                    sum(p[1] for p in pts) / len(pts),
+                )
+                self.centroid_positions[alpha] = centroid
+                if isinstance(anchor_positions, dict):
+                    anchor_positions[alpha] = centroid
         self._emitted_total += len(out)
         self._candidates_evaluated += len(field)
         return out
