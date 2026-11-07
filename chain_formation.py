@@ -348,10 +348,10 @@ def _candidate_pairs(
             c1 = min(n, c0 + cols_per)
             cols = np.arange(c0, c1, dtype=np.int64)
             # separation vector A(row) -> B(col)
-            dx = (xs[None, :] - xs[rows, None]).astype(np.float64)
-            dy = (ys[None, :] - ys[rows, None]).astype(np.float64)
+            dx = (xs[None, cols] - xs[rows, None]).astype(np.float64)
+            dy = (ys[None, cols] - ys[rows, None]).astype(np.float64)
             d = np.sqrt(dx * dx + dy * dy)
-            dth = np.mod(np.abs(th[rows, None] - th[None, :]), math.pi)
+            dth = np.mod(np.abs(th[rows, None] - th[None, cols]), math.pi)
             dth = np.minimum(dth, math.pi - dth)
 
             # Rule 1: each direction must point toward the other. theta is an
@@ -361,7 +361,7 @@ def _candidate_pairs(
             # traversal.
             sep_axis = np.mod(np.arctan2(dy, dx), math.pi)
             dev_row = _axis_diff(sep_axis, np.mod(th[rows, None], math.pi))
-            dev_col = _axis_diff(sep_axis, np.mod(th[None, :], math.pi))
+            dev_col = _axis_diff(sep_axis, np.mod(th[None, cols], math.pi))
             aligned = (dev_row <= alignment_tol) & (dev_col <= alignment_tol)
 
             # Rule 2: bend

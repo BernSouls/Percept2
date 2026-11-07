@@ -182,36 +182,46 @@ def _polyline_shape_invariants(pts, is_closed: bool) -> Dict[str, float]:
                   (1 = round, matching the symbolic observation's
                   convention, so the default 1.0 means "no anisotropy")
     """
+    pts = list(pts)
+    if is_closed and len(pts) >= 4:
+        if math.hypot(float(pts[-1][0]) - float(pts[0][0]),
+                      float(pts[-1][1]) - float(pts[0][1])) < 1e-6:
+            pts = pts[:-1]
     n = len(pts)
     if n < 3:
         return {"area": 0.0, "circularity": 0.0, "complexity": 0.0,
                 "roughness": 0.0, "isotropy": 0.0, "elongation": 1.0}
     xs = [float(p[0]) for p in pts]
     ys = [float(p[1]) for p in pts]
-    # The shoelace area and the perimeter.
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    # The shoelace area (for closed contours only) and the perimeter.
     area2 = 0.0
     perim = 0.0
     seg_dirs: List[float] = []
     m = n if is_closed else n - 1
     for i in range(m):
         j = (i + 1) % n
-        area2 += xs[i] * ys[j] - xs[j] * ys[i]
+        if is_closed:
+            area2 += (xs[i] - mx) * (ys[j] - my) - (xs[j] - mx) * (ys[i] - my)
         dx = xs[j] - xs[i]
         dy = ys[j] - ys[i]
         d = math.hypot(dx, dy)
         perim += d
         if d > 1e-9:
             seg_dirs.append(math.atan2(dy, dx))
-    area = abs(area2) * 0.5
-    # The turning at each interior vertex (and the closing vertex, when the
+    area = abs(area2) * 0.5 if is_closed else 0.0
+    # The turning at each interior vertex (and the closing vertices, when the
     # contour is closed).
     turns: List[float] = []
-    k = n if is_closed else n - 1
-    for i in range(1, n - 1):
-        ax = xs[i] - xs[i - 1]
-        ay = ys[i] - ys[i - 1]
-        bx = xs[i + 1] - xs[i]
-        by = ys[i + 1] - ys[i]
+    turn_indices = range(n) if is_closed else range(1, n - 1)
+    for i in turn_indices:
+        ip = (i - 1) % n
+        in_ = (i + 1) % n
+        ax = xs[i] - xs[ip]
+        ay = ys[i] - ys[ip]
+        bx = xs[in_] - xs[i]
+        by = ys[in_] - ys[i]
         la = math.hypot(ax, ay)
         lb = math.hypot(bx, by)
         if la < 1e-9 or lb < 1e-9:
@@ -220,8 +230,6 @@ def _polyline_shape_invariants(pts, is_closed: bool) -> Dict[str, float]:
         dot = ax * bx + ay * by
         turns.append(abs(math.atan2(cross, dot)))
     # The second-moment matrix of the boundary points (the inertia ellipse).
-    mx = sum(xs) / n
-    my = sum(ys) / n
     sxx = syy = sxy = 0.0
     for x, y in zip(xs, ys):
         dx = x - mx
@@ -661,7 +669,6 @@ class Observation2D(Observation):
     # ------------------------------------------------------------------
 
     @classmethod
-    @classmethod
     def from_image(cls, raw_image, flag_indices=None, effect_indices=None,
                    contours=None, rich: bool = True):
         """Pixel-to-graph bridge: run the two-stream front-end.
@@ -772,106 +779,9 @@ class Observation2D(Observation):
         hypercolumn_regions = lattice.tile_with_features(
             h, w, complex_, bank.theta, bank.sf, lum, corrected_rgb
         )
-
-        if rich:
-            for r in hypercolumn_regions:
-                cx = max(0, min(w - 1, int(round(r["centroid"][0]))))
-                cy = max(0, min(h - 1, int(round(r["centroid"][1]))))
-                win = max(P.TEXTURE_MIN_WINDOW, int(r["radius_px"]))
-                y0, y1 = max(0, cy - win), min(h, cy + win + 1)
-                x0, x1 = max(0, cx - win), min(w, cx + win + 1)
-
-                window_slice = complex_[:, :, y0:y1, x0:x1]
-                r["interior_variance"] = float(np.var(window_slice)) if window_slice.size > 0 else 0.0
-                r["coarseness"] = _compute_coarseness(window_slice)
-                r["regularity"] = _compute_regularity(window_slice)
-                r["gabor_complex"] = window_slice.mean(axis=(2, 3)).astype(np.float32)
-
-                r["gabor_simple"] = simple[:, :, :, cy, cx].copy()
-                r["gabor_phase"] = phase[:, :, cy, cx].copy()
-                r["gabor_complex_pooled"] = complex_pooled[:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                r["gabor_complex_on"] = _on_resp["complex"][:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                r["gabor_complex_off"] = _off_resp["complex"][:, :, y0:y1, x0:x1].mean(axis=(2, 3)).astype(np.float32)
-                # [O3] WINDOW STATISTICS, NOT ONE PIXEL PER REGION.
-                #
-                # These planes used to be read at the single pixel nearest the
-                # region's centroid. A pixel is a sample of noise -- a texture
-                # grain, a highlight, an anti-aliasing step -- so two regions
-                # with the SAME material could be described by opposite
-                # samples, and a region straddling a boundary by whichever
-                # side its centroid happened to land on. Every material plane
-                # is now the statistic of the region's OWN window. Phase and
-                # hue are circular, so they take a circular mean (a linear
-                # mean of angles is meaningless); the rest take a mean.
-                r["gabor_phase_on"] = _window_circular_mean_channels(
-                    _on_resp["phase"], y0, y1, x0, x1)
-                r["gabor_phase_off"] = _window_circular_mean_channels(
-                    _off_resp["phase"], y0, y1, x0, x1)
-                _opp_mean = [
-                    _window_mean(opponent[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["opponent"] = np.asarray(
-                    [float(opponent[cy, cx, _k]) if _opp_mean[_k] is None
-                     else _opp_mean[_k] for _k in range(3)], dtype=np.float32)
-                _ret = [
-                    _window_mean(retinex_res["lum_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["rg_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["by_comp"], y0, y1, x0, x1),
-                    _window_mean(retinex_res["sat_norm"], y0, y1, x0, x1),
-                    _window_circular_mean(retinex_res["hue"], y0, y1, x0, x1),
-                ]
-                _ret_point = (
-                    float(retinex_res["lum_comp"][cy, cx]),
-                    float(retinex_res["rg_comp"][cy, cx]),
-                    float(retinex_res["by_comp"][cy, cx]),
-                    float(retinex_res["sat_norm"][cy, cx]),
-                    float(retinex_res["hue"][cy, cx]),
-                )
-                r["opponent_retinex"] = tuple(
-                    _ret_point[_k] if _ret[_k] is None else float(_ret[_k])
-                    for _k in range(5))
-                _corr = [
-                    _window_mean(corrected_opp[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["corrected_opponent"] = np.asarray(
-                    [float(corrected_opp[cy, cx, _k]) if _corr[_k] is None
-                     else _corr[_k] for _k in range(3)], dtype=np.float32)
-                _rgb_mean = [
-                    _window_mean(corrected_rgb[..., _k], y0, y1, x0, x1)
-                    for _k in range(3)]
-                r["corrected_rgb"] = np.asarray(
-                    [float(corrected_rgb[cy, cx, _k]) if _rgb_mean[_k] is None
-                     else _rgb_mean[_k] for _k in range(3)], dtype=np.float32)
-                _rgc = _window_mean(rg_contrast, y0, y1, x0, x1)
-                _byc = _window_mean(by_contrast, y0, y1, x0, x1)
-                r["rg_contrast"] = (float(rg_contrast[cy, cx])
-                                    if _rgc is None else float(_rgc))
-                r["by_contrast"] = (float(by_contrast[cy, cx])
-                                    if _byc is None else float(_byc))
-                r["local_edge"] = _local_edge_at(lum, cy, cx)
-
-                # [SPEED / TRAP 4] The B1/B4 rich block is NOT computed
-                # here. It used to be, and the all-regions loop below
-                # computed it AGAIN for every hypercolumn, so every rich
-                # region paid for the 433-slot B1 signature and the
-                # second-order B4 texture signature TWICE per frame.
-                #
-                # VALUE IDENTITY: the all-regions loop recomputes
-                # r["b1_sig"], r["b1_class"], r["b1_stats"], r["b4_sig"] and
-                # r["b4_class"] for every region for which
-                # `not r.get("is_boundary", False)` -- which is exactly the
-                # hypercolumn set, because the contour regions are the only
-                # boundary regions and they never received a B1/B4 block
-                # here in the first place. The all-regions loop therefore
-                # OVERWRITES every value this block would have written, so
-                # dropping it leaves the region dicts byte-identical. (The
-                # two blocks even use different windows -- this one is
-                # uncapped in radius, the all-regions loop caps the radius
-                # at 32 px -- which is precisely why the SECOND write is the
-                # one that survives today, and why the first is dead work.)
-                #
-                # `b4_register` is still called by the all-regions loop, so
-                # the TEXTURE_RICH class stays registered exactly as before.
+        # Note: per-region rich features (Gabor/Retinex/B1/B4) are populated
+        # once across `all_regions` below (with the 32 px radius cap), rather
+        # than computing and immediately overwriting an uncapped pass here.
 
         # --- Stream 2: Association Field Contours ---
         if contours is None:

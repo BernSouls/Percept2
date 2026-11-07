@@ -187,13 +187,13 @@ STATE_CHANNEL_NAMES: Tuple[str, ...] = (
     "effect_marker",
     "flag_value",
     "degree",
+    "clutter_count",
     "age",
     "recency",
     "radius",
     "speed",
     "elevation",
     "planarity",
-    "clutter_count",
 )
 
 STATE_CHANNEL_COUNT: int = len(STATE_CHANNEL_NAMES)

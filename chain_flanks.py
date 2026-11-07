@@ -50,20 +50,28 @@ FLANK_OUT_OF_BOUNDS = None
 
 
 def perpendicular_offsets(pts: List[Tuple[float, float]],
-                          scale_px: float
+                          scale_px: float,
+                          closed: bool = False,
                           ) -> List[Optional[Tuple[float, float, float, float]]]:
     """Per-vertex (lx, ly, rx, ry) flank centres, or None per degenerate vertex.
 
     Vertex i's contour direction is the vector from vertex i-1 to vertex i+1
-    (a central difference), so the normal is well defined for both open and
-    closed walks. If that chord is zero -- a repeated point -- the vertex
-    yields None and is skipped rather than assigned a fabricated normal.
+    (a central difference on closed walks, or one-sided difference at open
+    endpoints so open endpoints do not wrap across the chord from start to end).
+    If that chord is zero -- a repeated point -- the vertex yields None and is
+    skipped rather than assigned a fabricated normal.
     """
     n = len(pts)
+    if n < 2:
+        return [None] * n
     out: List[Optional[Tuple[float, float, float, float]]] = []
     for i in range(n):
-        ip = (i - 1) % n
-        in_ = (i + 1) % n
+        if closed:
+            ip = (i - 1) % n
+            in_ = (i + 1) % n
+        else:
+            ip = max(0, i - 1)
+            in_ = min(n - 1, i + 1)
         dx = pts[in_][0] - pts[ip][0]
         dy = pts[in_][1] - pts[ip][1]
         mag = math.hypot(dx, dy)
@@ -210,7 +218,7 @@ def chain_flank_fields(
 
     sampler = ChannelSampler(channels, image_shape)
     offset = float(PERPENDICULAR_SCALE) * float(median_wavelength)
-    offsets = perpendicular_offsets(pts, offset)
+    offsets = perpendicular_offsets(pts, offset, closed=bool(g['closed']))
 
     members = []
     for i, fl in enumerate(offsets):

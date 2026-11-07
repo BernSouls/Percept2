@@ -906,7 +906,8 @@ class Scene:
             return float(self.background)
         obj = self.objects[hit.object_index]
         mat = obj.material
-        albedo = mat.albedo * mat.texture_value(*hit.uv)
+        u_c, v_c = mat.uv_for(hit.uv, hit.point_local)
+        albedo = mat.albedo * mat.texture_value(float(u_c), float(v_c))
         return float(self.ambient + albedo * self._lambert(hit.normal_world))
 
     # -- truth at a point --------------------------------------------------
@@ -1178,7 +1179,11 @@ class Scene:
             for direction, weight in self.extra_lights:
                 lam = lam + float(weight) * np.clip(
                     nw @ _unit(direction), 0.0, None)
-            tex = obj.material.texture_value_vec(uv[:, 0], uv[:, 1])
+            if obj.material.texture_space == "object":
+                u_c, v_c = obj.material.uv_for(uv, o + t[:, None] * d)
+            else:
+                u_c, v_c = uv[:, 0], uv[:, 1]
+            tex = obj.material.texture_value_vec(u_c, v_c)
             inten[sel] = (self.ambient
                           + obj.material.albedo * tex * lam)
         return inten
@@ -1425,8 +1430,9 @@ def single_object_scene(kind: str, *, width: int = 256, height: int = 256,
                layer=layer, omega=omega, velocity=velocity)
     if size_class:
         obj.size_class = size_class
-    return Scene(objects=[obj], light=_unit(light), camera=camera,
-                 camera_z=float(camera_z),
+    return Scene(objects=[obj], light=_unit(light),
+                 width=int(width), height=int(height),
+                 camera=camera, camera_z=float(camera_z),
                  extra_lights=tuple(extra_lights),
                  blur_sigma=float(blur_sigma),
                  noise_sigma=float(noise_sigma),
@@ -1478,8 +1484,9 @@ def occlusion_scene(*, width: int = 256, height: int = 256,
         fo.size_class = front_size_class
     if back_size_class:
         bo.size_class = back_size_class
-    return Scene(objects=[fo, bo], light=_unit(light), camera=camera,
-                 camera_z=float(camera_z),
+    return Scene(objects=[fo, bo], light=_unit(light),
+                 width=int(width), height=int(height),
+                 camera=camera, camera_z=float(camera_z),
                  extra_lights=tuple(extra_lights),
                  blur_sigma=float(blur_sigma),
                  noise_sigma=float(noise_sigma),

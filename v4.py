@@ -554,7 +554,10 @@ class SurfaceLens(HigherLens):
                             flank = fld
                     except Exception:
                         flank = None
-                bo_field = bo_by.get(anchor, [])
+                bo_field = list(bo_by.get(anchor, ()))
+                for role in getattr(det, "rho", ()) or ():
+                    if len(role) >= 2 and role[0] == "member":
+                        bo_field.extend(bo_by.get(role[1], ()))
                 c_det = color_by.get(anchor)
                 t_det = tex_by.get(anchor)
                 emitted.append(self._emit_one(
@@ -819,18 +822,24 @@ class IllusoryContourLens(HigherLens):
             for off in itertools.product((-1, 0, 1), repeat=2):
                 neigh.extend(grid.get((cx + off[0], cy + off[1]), ()))
             for i, (d1, p1) in enumerate(neigh):
-                theta1_bin = slot_value(d1.sigma, "ILLUSORY_CONTOUR", "theta",
-                                        default=0.0)
+                k1_sort = _detection_sort_key(d1)
+                theta1_bin = slot_value(
+                    d1.sigma, getattr(d1.sigma, "class_", "") or "ENDSTOPPED",
+                    "theta", default=0.0,
+                )
                 s1 = d1.z
                 for d2, p2 in neigh[i + 1 :]:
-                    pair_key = (min(id(d1), id(d2)), max(id(d1), id(d2)))
+                    k2_sort = _detection_sort_key(d2)
+                    pair_key = (k1_sort, k2_sort) if k1_sort <= k2_sort else (k2_sort, k1_sort)
                     if pair_key in seen_pairs:
                         continue
                     seen_pairs.add(pair_key)
                     if d1.alpha == d2.alpha:
                         continue
-                    theta2_bin = slot_value(d2.sigma, "ILLUSORY_CONTOUR",
-                                            "theta", default=0.0)
+                    theta2_bin = slot_value(
+                        d2.sigma, getattr(d2.sigma, "class_", "") or "ENDSTOPPED",
+                        "theta", default=0.0,
+                    )
                     s2 = d2.z
 
                     dx = p2[0] - p1[0]
@@ -858,7 +867,13 @@ class IllusoryContourLens(HigherLens):
                     strength = s1 * s2 * math.exp(-dist / max_gap)
                     candidates.append((strength, t1, dist, p1, p2, d1, d2))
 
-        candidates.sort(key=lambda x: -x[0])
+        candidates.sort(
+            key=lambda x: (
+                -x[0],
+                serialize_value(x[5].alpha),
+                serialize_value(x[6].alpha),
+            )
+        )
 
         used, kept = set(), []
         for cand in candidates[: P.ILLUSORY_MAX_CANDIDATES]:
@@ -884,6 +899,8 @@ class IllusoryContourLens(HigherLens):
                 ])
             )
             alpha = synthetic_anchor
+            if isinstance(anchor_positions, dict):
+                anchor_positions[alpha] = (float(mid_x), float(mid_y))
             # [UNIT TABLE] The bins come from the class' unit table
             # (core.registries.POPULATION_SLOTS["ILLUSORY_CONTOUR"]), so the
             # lookup index and the graded population are quantisations of the
@@ -1434,7 +1451,9 @@ class RegionShapeLens(HigherLens):
             (current_detections or {}).get("PEAK_CHAIN", []),
             anchor_positions, with_closure=True)
         emitted = []
-        for u, (poly, closed) in polys.items():
+        for u, (poly, closed) in sorted(
+            polys.items(), key=lambda kv: serialize_value(kv[0])
+        ):
             if not poly or len(poly) < 3:
                 continue
             (hist_bins, area_bin, elong_bin,

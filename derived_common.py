@@ -965,7 +965,7 @@ def compute_endstopped_map(
     side = np.zeros(Eg.shape, dtype=np.int8)
 
     for it, th in enumerate(thetas):
-        ay, ax = math.cos(th), -math.sin(th)
+        ay, ax = math.sin(th), math.cos(th)
 
         for isf in range(nsf):
             if sfs[isf] <= 0:

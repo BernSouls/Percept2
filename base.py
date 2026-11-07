@@ -368,11 +368,11 @@ def _segment_polyline(
         a_end = (k + 1) * seg_len if k < num_segs - 1 else total
         p_start = _point_at_arc(a_start)
         p_end = _point_at_arc(a_end)
-        dr = p_end[0] - p_start[0]
-        dc = p_end[1] - p_start[1]
-        if abs(dr) < 1e-9 and abs(dc) < 1e-9:
+        dx = p_end[0] - p_start[0]
+        dy = p_end[1] - p_start[1]
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
             continue
-        angle = math.atan2(dr, dc) % math.pi
+        angle = math.atan2(dy, dx) % math.pi
         mid = _point_at_arc((a_start + a_end) / 2.0)
         segments.append((angle, a_end - a_start, mid))
     return segments
@@ -2431,6 +2431,9 @@ class LensExecutor:
             serialize_tuple([serialize_int(8), serialize_value(u)]) for u in S_t.entity_indices
         } | {
             serialize_tuple([serialize_int(88), serialize_value(u)]) for u in S_t.entity_indices
+        } | {
+            _tb(a) for a in anchors
+            if isinstance(a, tuple) and len(a) == 4
         }
         state["M_prev"] = {k: v for k, v in state["M_prev"].items() if k in active_idents}
 
@@ -2520,7 +2523,12 @@ class LensExecutor:
             e_bin = int(math.floor(elong_norm * n_elong))
             if e_bin >= n_elong:
                 e_bin = n_elong - 1
-            anchor_bin = int(_anchor_class_bin(obs, u))
+            anchor_bin_raw = _anchor_class_bin(obs, u)
+            anchor_bin = (
+                int(anchor_bin_raw)
+                if math.isfinite(anchor_bin_raw) and anchor_bin_raw != ABSENT
+                else ABSENT
+            )
             responses.append(max(1.0 - elongation, EPSILON))
             anchors.append(u)
             pol_bins.append((theta_bin, e_bin, anchor_bin,
@@ -2720,9 +2728,7 @@ class PolarityLens:
             _field_simple = _f.get("simple")
 
         emitted = []
-        for anchor in sorted(anchor_positions.keys(),
-                             key=lambda a: (a if isinstance(a, int)
-                                            else str(a))):
+        for anchor in sorted(anchor_positions.keys(), key=serialize_value):
             g = None
             try:
                 g = observation.get_gabor_responses(anchor)

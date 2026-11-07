@@ -1074,15 +1074,19 @@ def b1_region_signature(bank, F_lum, F_on, F_off, y0, y1, x0, x1,
     # content.  Empty (zero energy) -> () so the signature keeps its bins
     # fallback rather than claiming a uniform distribution it did not see.
     win_energy = np.abs(F_lum["complex_local"][:, :, y0:y1, x0:x1]).astype(np.float64)
-    total_energy = float(win_energy.sum()) + 1e-9
-    theta_marginal = win_energy.sum(axis=(1, 2, 3)) / total_energy   # (nt,)
-    sf_marginal  = win_energy.sum(axis=(0, 2, 3)) / total_energy       # (nsf,)
-    joint        = win_energy.sum(axis=(2, 3)) / total_energy           # (nt, nsf)
-    population = (
-        tuple(float(v) for v in theta_marginal),
-        tuple(float(v) for v in sf_marginal),
-        tuple(float(v) for v in joint.reshape(-1)),
-    )
+    raw_energy = float(win_energy.sum())
+    if raw_energy <= _TINY:
+        population = ()
+    else:
+        total_energy = raw_energy + 1e-9
+        theta_marginal = win_energy.sum(axis=(1, 2, 3)) / total_energy   # (nt,)
+        sf_marginal  = win_energy.sum(axis=(0, 2, 3)) / total_energy       # (nsf,)
+        joint        = win_energy.sum(axis=(2, 3)) / total_energy           # (nt, nsf)
+        population = (
+            tuple(float(v) for v in theta_marginal),
+            tuple(float(v) for v in sf_marginal),
+            tuple(float(v) for v in joint.reshape(-1)),
+        )
 
     return tuple(out), population, st
 

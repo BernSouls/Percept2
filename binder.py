@@ -188,33 +188,6 @@ from core.hashing import (  # noqa: F401
 
 # Undirected edge types get canonicalized as (min_id, max_id). Directed
 # types preserve their source→target ordering.
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
-# [reorg Move 1] EdgeType and the edge-type registries now live in
-# core/types.py (single definition, imported here). The original block is
-# preserved in binder.py.pre_core_move.
-from core.types import (  # noqa: F401
-    EdgeType,
-    HEBBIAN_BOOST_TYPES,
-    REPRODUCIBLE_EDGE_TYPES,
-    UNDIRECTED_EDGE_TYPES,
-)
 
 
 # =============================================================================
@@ -646,7 +619,7 @@ def _surface_normal(det: Detection) -> Optional[Tuple[float, float, float]]:
     if det.k != "Surface" or len(q) < 7:
         return None
     slant = (clamp(float(q[5]), 0.0, 7.0) / 7.0) * (math.pi / 2.0)
-    tilt = 0.0 if float(q[6]) < 0.5 else math.pi
+    tilt = 0.0 if float(q[6]) < 4.0 else math.pi
     nx = math.sin(slant) * math.cos(tilt)
     ny = math.sin(slant) * math.sin(tilt)
     nz = math.cos(slant)
@@ -888,6 +861,8 @@ class Binder:
         self._lifecycle_owned = False
         self._v1_present_this_step = set()
         self._v1_onset_this_step = set()
+        self._v1_dets_this_step = ()
+        self._v1_node_ids = {}
         self._higher_dets_this_step = []
         self._higher_node_ids = {}
         self._higher_present_this_step = set()
@@ -914,6 +889,8 @@ class Binder:
         self._first_step = False
         self._v1_present_this_step = set()
         self._v1_onset_this_step = set()
+        self._v1_dets_this_step = ()
+        self._v1_node_ids = {}
         self._higher_dets_this_step = []
         self._higher_node_ids = {}
         self._higher_present_this_step = set()
@@ -1055,8 +1032,15 @@ class Binder:
             # boundary, and closed-chain interior vs exterior. Without these
             # the coupling matrix is all-positive and the oscillator can
             # synchronise but never separate (diagnostics/_a6_maskfree_result).
-            self._run_anti_phase_border_ownership(dets_tuple, node_ids, pos)
-            self._run_anti_phase_containment(dets_tuple, node_ids, pos)
+            v1_dets = getattr(self, "_v1_dets_this_step", ())
+            v1_nids = getattr(self, "_v1_node_ids", {})
+            all_dets = (
+                tuple(sorted(set(v1_dets) | set(dets_tuple), key=_detection_sort_key))
+                if v1_dets else dets_tuple
+            )
+            all_node_ids = {**v1_nids, **node_ids} if v1_nids else node_ids
+            self._run_anti_phase_border_ownership(all_dets, all_node_ids, pos)
+            self._run_anti_phase_containment(all_dets, all_node_ids, pos)
             self._run_curvature_sign_continuity(dets_tuple, node_ids, pos)
             self._run_cocircular(dets_tuple, node_ids, pos)
             # [Pass 19] Emission ENABLED. The blocker was the inverted
@@ -1070,7 +1054,7 @@ class Binder:
             # [Pass 23] Mid-level (V1/V2) vocabulary: colour-opponent
             # borders, end-stopped line terminations, and cross-scale
             # correspondence.
-            self._run_color_opponent_border(dets_tuple, node_ids, pos)
+            self._run_color_opponent_border(all_dets, all_node_ids, pos)
             self._run_line_termination(dets_tuple, node_ids, pos)
             self._run_cross_scale_identity(dets_tuple, node_ids, pos)
         elif level == "v4":
@@ -1236,6 +1220,8 @@ class Binder:
             (d.k, _node_signature_hash(d.sigma)) for d in dets
         }
         self._v1_onset_this_step = set(self._pattern_onset_now)
+        self._v1_dets_this_step = dets
+        self._v1_node_ids = dict(node_ids)
         self._step_anchor_positions = anchor_positions
 
         # [V9 Track 2 - B.26] Delayed position capture. Both minting sites
@@ -2346,7 +2332,7 @@ class Binder:
                 continue
             if depth < float(P.ANTIPHASE_MIN_CONFIDENCE):
                 continue
-            a_id, b_id = (u, v) if u < v else (v, u)
+            a_id, b_id = u, v            # directed: enclosing ring (near) -> interior (far)
             # [Q3] OCCLUSION again (see the border-ownership channel): a ring
             # and its interior are an occlusion pair, the positive
             # PART_CONTAINMENT emitter already owns that type, and one edge
@@ -2396,7 +2382,7 @@ class Binder:
                 continue
             u = node_ids[a]
             q_a = a.sigma.quantized
-            chir_a = (q_a[6] - 4.0) if len(q_a) > 6 else 0.0
+            chir_a = (q_a[6] - 4.0) / 4.0 if len(q_a) > 6 else 0.0
             for j in range(i + 1, len(contour_dets)):
                 b = contour_dets[j]
                 pb = anchor_positions.get(b.alpha)
@@ -2412,11 +2398,11 @@ class Binder:
                 if dist > 2.0 * R:
                     continue
                 q_b = b.sigma.quantized
-                chir_b = (q_b[6] - 4.0) if len(q_b) > 6 else 0.0
-                same_sign = (chir_a * chir_b > 0.0) or (abs(chir_a) < 0.5 and abs(chir_b) < 0.5)
+                chir_b = (q_b[6] - 4.0) / 4.0 if len(q_b) > 6 else 0.0
+                same_sign = (chir_a * chir_b > 0.0) or (abs(chir_a) < 0.125 and abs(chir_b) < 0.125)
                 if not same_sign:
                     continue
-                signal = math.exp(-dist / R) * (1.0 - abs(chir_a - chir_b) / 8.0)
+                signal = math.exp(-dist / R) * (1.0 - abs(chir_a - chir_b) / 2.0)
                 if signal <= 0.0:
                     continue
                 # [P2] THE NAMED WRITER: the difference of the two contours'
@@ -2767,7 +2753,7 @@ class Binder:
             geom = _contour_point_geometry(d, anchor_positions)
             if geom is None:
                 continue
-            r, ang_ext, ecc = geom
+            r, ecc, ang_ext = geom
             contour_info.append((d, pos, r, ang_ext, ecc, nid))
 
         if len(contour_info) < 2:
@@ -4473,7 +4459,7 @@ class Binder:
             if not self._is_structural_anchor(a):
                 continue
             pa = anchor_positions[a]
-            if len(pa) < 3 or not all(math.isfinite(x) for x in pa[:3]):
+            if len(pa) < 2 or not all(math.isfinite(x) for x in pa[:3]):
                 continue
             dists: List[Tuple[float, Any]] = []
             for b in anchors:
@@ -4482,9 +4468,9 @@ class Binder:
                 if not self._is_structural_anchor(b):
                     continue
                 pb = anchor_positions[b]
-                if len(pb) < 3 or not all(math.isfinite(x) for x in pb[:3]):
+                if len(pb) < 2 or not all(math.isfinite(x) for x in pb[:3]):
                     continue
-                d_ab = math.sqrt(sum((x - y) ** 2 for x, y in zip(pa[:3], pb[:3])))
+                d_ab = _pos_dist(pa[:3], pb[:3])
                 if math.isfinite(d_ab):
                     dists.append((d_ab, b))
             dists.sort(key=lambda t: (t[0], serialize_value(t[1])))
@@ -4538,13 +4524,13 @@ class Binder:
                     continue
                 pa = anchor_positions[a]
                 pb = anchor_positions[b]
-                if len(pa) < 3 or len(pb) < 3:
+                if len(pa) < 2 or len(pb) < 2:
                     continue
                 if not all(math.isfinite(x) for x in pa[:3]):
                     continue
                 if not all(math.isfinite(x) for x in pb[:3]):
                     continue
-                d_ab = math.sqrt(sum((x - y) ** 2 for x, y in zip(pa[:3], pb[:3])))
+                d_ab = _pos_dist(pa[:3], pb[:3])
                 if not math.isfinite(d_ab) or d_ab > radius:
                     continue
                 src = node_ids[rep_by_anchor[a]]
@@ -5610,7 +5596,13 @@ class Binder:
                 # [P2] THE NAMED WRITER: the AXIAL ANGLE DIFFERENCE in
                 # RADIANS, the BISECTOR ORIENTATION in RADIANS (axial) and
                 # the separation in WAVELENGTHS.
-                bisector_theta = ((theta_a + theta_b) / 2.0) % math.pi
+                bisector_theta = (
+                    0.5
+                    * math.atan2(
+                        math.sin(2.0 * theta_a) + math.sin(2.0 * theta_b),
+                        math.cos(2.0 * theta_a) + math.cos(2.0 * theta_b),
+                    )
+                ) % math.pi
                 dist_w = dist / max(self._step_extraction_scale, 1e-6)
                 ep = _edge_params(
                     cls_name,

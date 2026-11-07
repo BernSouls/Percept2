@@ -739,6 +739,9 @@ class ConceptGraph:
             self._pattern_node_detection_hash[nid] = detection_hash
         if signature is not None:
             self._pattern_node_signature[nid] = signature
+            self._pattern_node_population_count[nid] = (
+                1 if getattr(signature, "population", None) else 0
+            )
         self._pattern_node_last_seen[nid] = self.t
         return nid
 
@@ -760,7 +763,9 @@ class ConceptGraph:
         prev = self._pattern_node_signature.get(nid)
         if prev is None:
             self._pattern_node_signature[nid] = signature
-            self._pattern_node_population_count[nid] = 1
+            self._pattern_node_population_count[nid] = (
+                1 if getattr(signature, "population", None) else 0
+            )
             return
         pop = getattr(signature, "population", None)
         if not pop:
@@ -768,9 +773,13 @@ class ConceptGraph:
         axes = get_population_axes(getattr(prev, "class_", "") or "")
         if axes is None:
             return
-        n_prev = float(self._pattern_node_population_count.get(nid, 1))
-        merged = merge_populations(getattr(prev, "population", ()) or (),
-                                   n_prev, pop, 1.0, axes)
+        prev_pop = getattr(prev, "population", ()) or ()
+        n_prev = (
+            float(self._pattern_node_population_count.get(nid, 1))
+            if prev_pop
+            else 0.0
+        )
+        merged = merge_populations(prev_pop, n_prev, pop, 1.0, axes)
         if not merged:
             return
         self._pattern_node_signature[nid] = dataclasses.replace(

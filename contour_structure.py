@@ -57,7 +57,7 @@ def _polyline_arc_length(polyline: List[Tuple[int, int]]) -> float:
 def _tangent_at(
     polyline: List[Tuple[int, int]], at_start: bool, span: int = 3
 ) -> float:
-    """Local tangent (atan2(dr, dc)) at one end of an ordered polyline,
+    """Local tangent (atan2(dy, dx)) at one end of an ordered (x, y) polyline,
     using up to `span` pixels of local support."""
     n = len(polyline)
     if n < 2:
@@ -67,7 +67,7 @@ def _tangent_at(
         p1, p2 = polyline[0], polyline[span]
     else:
         p1, p2 = polyline[n - 1 - span], polyline[n - 1]
-    return math.atan2(p2[0] - p1[0], p2[1] - p1[1])
+    return math.atan2(p2[1] - p1[1], p2[0] - p1[0])
 
 def _moore_neighbor_trace(
     coords: List[Tuple[int, int]],
@@ -204,7 +204,7 @@ def _detect_t_junctions(
                     continue
                 p_lo, p_hi = poly_top[lo], poly_top[hi]
                 tan_top = math.atan2(
-                    p_hi[0] - p_lo[0], p_hi[1] - p_lo[1]
+                    p_hi[1] - p_lo[1], p_hi[0] - p_lo[0]
                 )
                 ang = abs(_angle_diff(tan_stem_out, tan_top))
                 ang = min(ang, math.pi - ang)
@@ -530,16 +530,21 @@ class V1RetinotopicLattice:
                     # 0.277.  It is a measurement of the image, it is
                     # scale-free, and it is not a copy of any other slot.
                     order = np.argsort(dists, axis=None)
+                    dists_sorted = dists.ravel()[order]
                     cum = np.cumsum(w_n.ravel()[order])
 
-                    def _mass_at(q: float) -> float:
+                    def _r_sq_at(q: float) -> float:
                         i = int(np.searchsorted(cum, q))
                         i = min(max(i, 0), len(cum) - 1)
-                        return float(cum[i])
+                        d = float(dists_sorted[i])
+                        return d * d
 
-                    m50 = _mass_at(0.5)
-                    m95 = _mass_at(0.95)
-                    r["circularity"] = clamp(m50 / (m95 + 1e-9), 0.0, 1.0)
+                    r50_sq = _r_sq_at(0.5)
+                    r95_sq = _r_sq_at(0.95)
+                    r["circularity"] = (
+                        1.0 if r95_sq <= 1e-12
+                        else clamp(r50_sq / (r95_sq + 1e-9), 0.0, 1.0)
+                    )
                 else:
                     r["circularity"] = 0.5
             else:
