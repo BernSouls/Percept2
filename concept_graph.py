@@ -308,7 +308,8 @@ class Concept:
     onset: int = 0
     onset_time: int = -1
     A_prev: int = 0
-    # §1.12: TRANSITION edge signal reads parent's onset at t-1.
+    # Compatibility field for legacy schema records; no active temporal
+    # EdgeType consumes this onset history.
     onset_prev: int = 0
     step_F_count: int = 0
     step_S_count: int = 0
@@ -385,8 +386,11 @@ class Concept:
 
 @dataclass
 class Edge:
-    """§1.12 typed relation. edge_type distinguishes the channel; lag is
-    meaningful only for SEQUENCE."""
+    """§1.12 typed relation. edge_type distinguishes its spatial category.
+
+    ``lag`` remains as a compatibility field; consolidated perceptual edges
+    keep it at zero because temporal edge categories were removed.
+    """
 
     parent: int
     child: int
@@ -2465,24 +2469,24 @@ class ConceptGraph:
         )
 
     def _instantiate_concept_edge(self, p: int, c: int, t: int) -> None:
-        """Concept-level ancestry edge. Its signal is derived from activation
-        in step_28_update_edges (§1.12 CO_ACTIVATION signal); initialized to
-        zero weight so the first EMA observation sets it."""
-        key = (p, c, EdgeType.CO_ACTIVATION)
+        """Concept-level ancestry edge (container -> member). Its signal is
+        derived from activation in step_28_update_edges; initialized to zero
+        weight so the first EMA observation sets it."""
+        key = (p, c, EdgeType.CONTAINMENT)
         if key in self.edges:
             return
         self.edges[key] = Edge(
             parent=p,
             child=c,
             weight=0.0,
-            edge_type=EdgeType.CO_ACTIVATION,
+            edge_type=EdgeType.CONTAINMENT,
             lag=0,
             pending_signal=0.0,
             observed_at=-1,
             initialized=False,
         )
-        self._outgoing[p].add((c, EdgeType.CO_ACTIVATION))
-        self._incoming[c].add((p, EdgeType.CO_ACTIVATION))
+        self._outgoing[p].add((c, EdgeType.CONTAINMENT))
+        self._incoming[c].add((p, EdgeType.CONTAINMENT))
         self._topo_version += 1
         self.topology_revision += 1  # [Batch D / P1-1]
 
@@ -3150,14 +3154,6 @@ class ConceptGraph:
     ) -> float:
         p = edge.parent
         c = edge.child
-        et = edge.edge_type
-        if et == EdgeType.TRANSITION:
-            parent = self.concepts.get(p)
-            child = self.concepts.get(c)
-            if parent is None or child is None:
-                return 0.0
-            return 1.0 if (parent.onset_prev == 1 and child.onset == 1) else 0.0
-        # CO_ACTIVATION and legacy v30 signal.
         child = self.concepts.get(c)
         parent = self.concepts.get(p)
         onset_c = activation_engine.get_onset(c, t)

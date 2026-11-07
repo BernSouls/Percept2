@@ -1,0 +1,11 @@
+{
+  "generator": "diagnostics/_round10_C_fit.py",
+  "method": "logistic regression (MLE, L2=1e-3) on synthetic ground-truth corpus",
+  "note": "C3: contrast polarity is deliberately NOT a voter; cues are convexity, multi-scale enclosure, and T-junction evidence.",
+  "seed": 20261019,
+  "weights": {
+    "convexity": 2.179510312941029,
+    "enclosure": 2.0831391653019824,
+    "t_junction": 1.5112330304520216
+  }
+}

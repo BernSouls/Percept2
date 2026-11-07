@@ -68,6 +68,7 @@ from perception.lenses.derived_common import (  # noqa: F401
 from perception.lenses.derived_base import (  # noqa: F401
     HigherLens,
 )
+from perception.lenses.v2 import edge_association_strength  # shared step-valid signal
 
 # [UNIT TABLE] The unit tables of the classes this module emits, looked up BY
 # NAME, so the bins path and the graded population read the SAME declaration
@@ -990,8 +991,9 @@ class CurveComplexLens(HigherLens):
             self._skipped_no_position += 1
             return []
 
-        contour_dets = current_detections.get("Contour", [])
-        junction_dets = current_detections.get("Junction", [])
+        chain_dets = current_detections.get("PEAK_CHAIN", []) or []
+        contour_dets = list(chain_dets) + list(current_detections.get("Contour", []) or [])
+        junction_dets = current_detections.get("Junction", []) or []
         if not contour_dets and not junction_dets:
             self._skipped_no_component += 1
             return []
@@ -1007,7 +1009,7 @@ class CurveComplexLens(HigherLens):
             node_id_to_detection.setdefault(nid, det)
             node_id_to_kind.setdefault(nid, "Contour")
         for det in sorted(junction_dets, key=_detection_sort_key):
-            if len(det.sigma.quantized) < 3:
+            if len(det.sigma.quantized) < 2:
                 continue
             nid = concept_graph.get_or_create_pattern_node(
                 det.k, _node_signature_hash(det.sigma), signature=det.sigma
@@ -1015,26 +1017,16 @@ class CurveComplexLens(HigherLens):
             node_id_to_detection.setdefault(nid, det)
             node_id_to_kind.setdefault(nid, "Junction")
 
-        # Weight filter: THETA_CONTOUR_EDGE for BOTH edge types. V4 is
-        # structural topology over pairs that have already proven their
-        # continuity through the V2 EMA, so one gate is right; a second,
-        # stricter gate would drop bundles whose junction links are
-        # legitimately weaker than their contour links.
-        # Every admitted V2 node enters the component graph, including
-        # degree-0 nodes: an isolated contour is a singleton component and
-        # may emit as topology class 0 (single closed loop) or 1 (single
-        # open contour). Seeding only edge-endpoints made those classes
-        # unreachable even after the size guard was lifted.
         G_v4: Dict[int, Set[int]] = defaultdict(set)
         for nid in node_id_to_detection:
             G_v4[nid]  # touch: register degree-0 nodes as components
         for nid in node_id_to_detection:
             for edge in concept_graph.get_outgoing_edges(nid):
                 if edge.edge_type not in (
-                    EdgeType.CONTOUR_CONTINUITY, EdgeType.JUNCTION_CONTOUR
+                    EdgeType.CONTINUITY, EdgeType.JUNCTION
                 ):
                     continue
-                if edge.weight < P.THETA_CONTOUR_EDGE:
+                if edge_association_strength(edge, t) < P.THETA_CONTOUR_EDGE:
                     continue
                 if edge.child not in node_id_to_detection:
                     continue
@@ -1042,10 +1034,10 @@ class CurveComplexLens(HigherLens):
                 G_v4[edge.child].add(nid)
             for edge in concept_graph.get_incoming_edges(nid):
                 if edge.edge_type not in (
-                    EdgeType.CONTOUR_CONTINUITY, EdgeType.JUNCTION_CONTOUR
+                    EdgeType.CONTINUITY, EdgeType.JUNCTION
                 ):
                     continue
-                if edge.weight < P.THETA_CONTOUR_EDGE:
+                if edge_association_strength(edge, t) < P.THETA_CONTOUR_EDGE:
                     continue
                 if edge.parent not in node_id_to_detection:
                     continue
@@ -1158,7 +1150,8 @@ class CurveComplexLens(HigherLens):
             # Curvature-template bins over the contour members' sequences.
             template_hits = [0.0] * P.CURVE_COMPLEX_TEMPLATE_BINS
             for cid in contour_ids:
-                cq = node_id_to_detection[cid].sigma.quantized
+                cdet = node_id_to_detection[cid]
+                cq = cdet.sigma.quantized
                 if len(cq) >= 27:
                     seq = cq[7:27]
                     for k in range(20):
@@ -1170,6 +1163,17 @@ class CurveComplexLens(HigherLens):
                         t_bin = int((idx / 3.0) * P.CURVE_COMPLEX_TEMPLATE_BINS)
                         t_bin = min(P.CURVE_COMPLEX_TEMPLATE_BINS - 1, t_bin)
                         template_hits[t_bin] += (float(cq[k]) - 3.5) / 3.5
+                else:
+                    # PEAK_CHAIN (arity 6): sample continuous curvature profile
+                    # directly from its ordered member peak positions.
+                    prof_c = sample_curvature_profile(
+                        cdet, anchor_positions, n=P.CURVE_COMPLEX_TEMPLATE_BINS
+                    )
+                    if prof_c is not None and len(prof_c) == P.CURVE_COMPLEX_TEMPLATE_BINS:
+                        for k in range(P.CURVE_COMPLEX_TEMPLATE_BINS):
+                            template_hits[k] += float(prof_c[k])
+                    elif len(cq) >= 5:
+                        template_hits[0] += float(cq[4]) / 7.0
             _max_abs = max(1e-6, max(abs(h) for h in template_hits))
             # The CONTINUOUS template energies: each bin's accumulated
             # curvature energy, normalised by the bundle's strongest one.

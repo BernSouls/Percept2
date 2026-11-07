@@ -1,0 +1,84 @@
+{
+  "generator": "diagnostics/_sessionG_e0_texture.py",
+  "method": "isotonic (binned PAVA) map of measured -> true slant and blockwise robust width, fitted on CAL poses only",
+  "texture": "noise freq 30 contrast 0.8, patch radius 14 px",
+  "anisotropy_gate": 0.2,
+  "anisotropy_max": 0.6,
+  "slant_map": {
+    "measured": [
+      5.4,
+      33.06,
+      35.01,
+      36.99,
+      40.85,
+      42.9,
+      45.12,
+      47.05,
+      48.97,
+      50.97,
+      55.16,
+      57.11,
+      60.68,
+      62.43,
+      64.21
+    ],
+    "true": [
+      24.9,
+      24.97,
+      26.17,
+      29.37,
+      30.24,
+      36.64,
+      42.84,
+      43.88,
+      45.05,
+      48.31,
+      57.24,
+      60.17,
+      62.09,
+      63.54,
+      63.54
+    ]
+  },
+  "slant_width": {
+    "measured": [
+      18.23,
+      33.06,
+      35.01,
+      37.98,
+      40.85,
+      42.9,
+      45.12,
+      55.16
+    ],
+    "sigma": [
+      13.31,
+      13.31,
+      13.31,
+      13.31,
+      13.31,
+      9.43,
+      6.13,
+      4.14
+    ]
+  },
+  "tilt_width": {
+    "anisotropy": [
+      0.2,
+      0.35,
+      0.45
+    ],
+    "sigma": [
+      18.19,
+      7.38,
+      7.06
+    ]
+  },
+  "pooled_slant_sigma": 8.03,
+  "validation": {
+    "test_adj_bias": -0.0,
+    "test_adj_rms": 8.81,
+    "test_gate_coverage": 0.4118,
+    "test_gated_tilt_abs_med": 10.47
+  }
+}

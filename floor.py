@@ -181,9 +181,9 @@ class SensoryFloor:
     def make_action_detection(self, action: Any, t: int) -> Any:
         """Public delegation to the Action lens (B2): construct the
         Detection for an action executed at step `t`. The Pipeline calls
-        this at execution time to pre-register the action pattern's onset
-        in the Binder (correct SEQUENCE attribution lag); the lens itself
-        re-emits the identical pattern at t+1 for binding presence."""
+        this at execution time to register the exact action pattern in the
+        current step; the lens re-emits the same identity at t+1. This
+        records action presence only and emits no temporal edge."""
         return self._get_lens_executor().make_action_detection(action, t)
 
     # -------------------------------------------------------------------------

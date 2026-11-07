@@ -113,18 +113,18 @@ Contents:
 
   - Promotion gating: eligibility and scoring for operator promotion.
 
-Removed from v30 (absorbed by the flat taxonomy):
+Retired concept-derived lens types (not active edge categories):
 
-  ConceptSequence   → SEQUENCE binder
-  ConceptDegree     → DEGREE binder
-  Convergence       → node in-degree, observable directly
-  Divergence        → node out-degree, observable directly
+  ConceptSequence   -> no SEQUENCE EdgeType
+  ConceptDegree     -> spatial degree evidence is read by binders
+  Convergence       -> node in-degree, observable directly
+  Divergence        -> node out-degree, observable directly
 
-The deleted lenses were concept-derived duplicates of edge-emitters.
-Under the flat taxonomy they are redundant: the same relation is already
-captured as an edge by the corresponding binder. Causality,
-in particular, is now expressed as edge structure — a SEQUENCE edge
-(temporal priority) inside a crystallizing candidate. Nothing is reified.
+The active spatial relation taxonomy has exactly eight categories.
+Co-motion and signed anti-phase evidence are represented through
+MATERIAL; temporal priority is not emitted as a pattern edge.
+Causal schema and action logic may remain in the planning model, but
+this module does not reify temporal relations.
 """
 
 EPSILON = 1e-9
@@ -316,15 +316,10 @@ LENS_INPUT_DECLARATIONS: Tuple[LensInputDeclaration, ...] = (
     LensInputDeclaration(
         name="Junction",
         attribute="junction_lens",
-        # `produces="Junction"` is the ALIAS (families + residual).  The
-        # families are emitted under their own kinds and are listed so the
-        # contract test can see that the alias is not a lie.
         produces="Junction",
         also_produces=JUNCTION_FAMILY_KINDS,
-        # [U21 LEAD 1] the polarised family too: its pattern edges
-        # (ORIENTATION_BEND / ORIENTATION_JUNCTION) are laid over it.
-        reads=("Orientation", "OrientationPol"),
-        required=(("Orientation", "OrientationPol"),),
+        reads=("PEAK_CHAIN", "Orientation", "OrientationPol"),
+        required=(("PEAK_CHAIN", "Orientation", "OrientationPol"),),
     ),
     # Tier 2 -- 1D structural event.
     LensInputDeclaration(
@@ -379,10 +374,10 @@ LENS_INPUT_DECLARATIONS: Tuple[LensInputDeclaration, ...] = (
         name="CurveComplex",
         attribute="curve_complex_lens",
         produces="CurveComplex",
-        reads=("Contour", "Junction"),
-        # EITHER a contour or a junction is enough: the lens builds its
-        # components over the union of the two.
-        required=(("Contour", "Junction"),),
+        reads=("PEAK_CHAIN", "Contour", "Junction"),
+        # PEAK_CHAIN is the primary contour spine; Contour is optional when
+        # CONTOUR_LENS_ENABLED is True; Junction joins meeting chains.
+        required=(("PEAK_CHAIN", "Contour", "Junction"),),
     ),
 )
 
@@ -906,11 +901,11 @@ def _collect_continuity_neighbours(
     pattern_continuity: Set[Tuple[int, int]] = set()
     for nid in set(det_to_nid.values()):
         for edge in concept_graph.get_outgoing_edges(nid):
-            if edge.edge_type == EdgeType.ORIENTATION_CONTINUITY:
+            if edge.edge_type == EdgeType.CONTINUITY:
                 pattern_continuity.add((nid, edge.child))
                 pattern_continuity.add((edge.child, nid))
         for edge in concept_graph.get_incoming_edges(nid):
-            if edge.edge_type == EdgeType.ORIENTATION_CONTINUITY:
+            if edge.edge_type == EdgeType.CONTINUITY:
                 pattern_continuity.add((edge.parent, nid))
                 pattern_continuity.add((nid, edge.parent))
 

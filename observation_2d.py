@@ -433,6 +433,25 @@ class Observation2D(Observation):
 
         # [v9] T-junction detection on the final region list.
         self._t_junctions = _detect_t_junctions(self._regions)
+        self._surface_fragments: List[Any] = []
+        self._fragment_ownership_records: List[Dict[str, Any]] = []
+        self._light_prior: Optional[Any] = None
+
+    @property
+    def light_prior(self) -> Optional[Any]:
+        """Image-fitted illumination prior used for fragment shading cues."""
+        return self._light_prior
+
+    @property
+    def surface_fragments(self) -> List[Any]:
+        return list(self._surface_fragments)
+
+    def get_surface_fragments(self) -> List[Any]:
+        return list(self._surface_fragments)
+
+    @property
+    def fragment_ownership_records(self) -> List[Dict[str, Any]]:
+        return list(self._fragment_ownership_records)
 
     def modality(self) -> str:
         return "2d"
@@ -670,7 +689,8 @@ class Observation2D(Observation):
 
     @classmethod
     def from_image(cls, raw_image, flag_indices=None, effect_indices=None,
-                   contours=None, rich: bool = True):
+                   contours=None, rich: bool = True,
+                   light_prior: Optional[Any] = None):
         """Pixel-to-graph bridge: run the two-stream front-end.
 
         Stream 1 (V1 lattice): tessellates the visual field into
@@ -990,7 +1010,94 @@ class Observation2D(Observation):
         obj._gabor_complex = complex_
         obj._gabor_thetas = bank.theta
         obj._gabor_sfs = bank.sf
+
+        if rich:
+            obj._populate_surface_fragments(lum, corrected_rgb, light_prior=light_prior)
         return obj
+
+    def _populate_surface_fragments(
+        self,
+        lum: np.ndarray,
+        corrected_rgb: np.ndarray,
+        light_prior: Optional[Any] = None,
+    ) -> None:
+        """Compute fragment_ownership_records -> build_surface_fragments on the
+        observation's PEAK_CHAIN spine and store the resulting 2.5D fragments."""
+        from perception.lenses.peak_lens import PeakLens
+        from perception.lenses.chain_lens import ChainLens
+        from perception.fragment_ownership import fragment_ownership_records
+        from perception.interior_field import interior_field_for, ownership_from_enclosure
+        from perception.surface_fragments import (
+            LightPrior,
+            assign_depth_layers,
+            build_surface_fragments,
+            estimate_light_prior,
+            t_junction_order,
+        )
+
+        ext_scale = self.get_extraction_scale()
+        frag_pos: Dict[Any, Tuple[float, ...]] = dict(self.get_positions())
+        cur_dets: Dict[str, List[Any]] = {}
+
+        peak_lens = PeakLens()
+        peaks = peak_lens.step(
+            0, None, None, frag_pos, None, cur_dets,
+            extraction_scale=ext_scale, observation=self,
+        )
+        cur_dets["CONTOUR_PEAK"] = peaks
+
+        chain_lens = ChainLens()
+        chains = chain_lens.step(
+            0, None, None, frag_pos, None, cur_dets,
+            extraction_scale=ext_scale, observation=self,
+        )
+        cur_dets["PEAK_CHAIN"] = chains
+        if not chains:
+            return
+
+        tj_pts = [pt for _s, _t, pt, _c in self.get_t_junctions()]
+        records = fragment_ownership_records(
+            chains, frag_pos, observation=self,
+            extraction_scale=ext_scale, t_junction_positions=tj_pts,
+        )
+        self._fragment_ownership_records = list(records)
+        if not records:
+            return
+
+        if light_prior is None:
+            light_prior = _estimate_contour_light_prior(
+                records, lum, ext_scale, estimate_light_prior
+            )
+        self._light_prior = light_prior
+
+        ifield = interior_field_for(self, luminance=lum)
+        interior_arr = ifield.get("interior") if isinstance(ifield, dict) else None
+
+        def _enc_lookup(pt: Tuple[float, float], on: Tuple[float, float]) -> float:
+            if not isinstance(ifield, dict):
+                return 0.0
+            return ownership_from_enclosure(ifield, pt, on)
+
+        # Corpus-calibrated slant/tilt widths (contour_relations.py: 3.0 deg slant,
+        # 10.9 deg tilt) and scale-proportional flank sampling offsets.
+        flank_off = max(4.0, 0.55 * ext_scale)
+        flank_patch = max(3.0, 0.40 * ext_scale)
+        frags = build_surface_fragments(
+            records,
+            lum,
+            _enc_lookup,
+            light_prior,
+            interior=interior_arr,
+            sigma_contour=(3.0, 10.9),
+            shading_sigma=(3.0, 10.9),
+            shading_offset_px=flank_off,
+            shading_patch_px=flank_patch,
+            rgb=corrected_rgb,
+        )
+        if frags:
+            tj_edges = t_junction_order(frags, records)
+            assign_depth_layers(frags, records, extra_edges=tj_edges)
+        self._surface_fragments = list(frags)
 
     def get_gabor_responses(self, u):
         """Per-region Gabor summary, or None on the region path.
@@ -1096,3 +1203,66 @@ def _bilinear_resize(img, nh, nw):
         return zoom(img, (nh / img.shape[0], nw / img.shape[1], 1), order=1)
     return zoom(img, (nh / img.shape[0], nw / img.shape[1]), order=1)
 
+
+def _estimate_contour_light_prior(
+    records,
+    lum: np.ndarray,
+    ext_scale: float,
+    estimator,
+):
+    """Fit an image-specific light prior from measured owner-side flank samples.
+
+    The normals are geometric proxies formed from the measured contour
+    orientation plus the viewer axis; the luminance samples come from this
+    image. No renderer material, object label, or ground-truth light is read.
+    """
+    from perception.surface_fragments import LightPrior
+
+    L = np.asarray(lum, dtype=np.float64)
+    if L.ndim != 2 or L.size == 0:
+        return LightPrior((0.0, 0.0, 1.0), 0.0)
+    h, w = L.shape
+    step = max(2.0, 0.30 * max(float(ext_scale), 1.0))
+
+    normals = []
+    samples = []
+    for rec in records:
+        pos = rec.get("pos")
+        nrm = rec.get("normal")
+        signed = rec.get("signed")
+        if pos is None or nrm is None or signed is None:
+            continue
+        s = float(signed)
+        if not math.isfinite(s) or abs(s) < 0.05:
+            continue
+        nx, ny = float(nrm[0]), float(nrm[1])
+        mag = math.hypot(nx, ny)
+        if mag < 1e-9:
+            continue
+        owner_x = (nx / mag) * (1.0 if s > 0.0 else -1.0)
+        owner_y = (ny / mag) * (1.0 if s > 0.0 else -1.0)
+        sx = int(round(float(pos[0]) + step * owner_x))
+        sy = int(round(float(pos[1]) + step * owner_y))
+        if not (0 <= sx < w and 0 <= sy < h):
+            continue
+        value = float(L[sy, sx])
+        if not math.isfinite(value):
+            continue
+        # The measured rim normal points opposite the inward owner direction.
+        raw_normal = (-owner_x, -owner_y, 1.0)
+        nlen = math.sqrt(sum(v * v for v in raw_normal))
+        normals.append(tuple(v / nlen for v in raw_normal))
+        samples.append(value)
+
+    if len(samples) < 12:
+        return LightPrior((0.0, 0.0, 1.0), float(np.quantile(L, 0.02)))
+    try:
+        # estimate_light_prior expects a sequence of image planes paired with
+        # the corresponding measured normal fields; one observation is a
+        # one-scene calibration fit, not access to synthetic truth.
+        return estimator(
+            [np.asarray(samples, dtype=np.float64)],
+            [np.asarray(normals, dtype=np.float64)],
+        )
+    except (ValueError, TypeError, np.linalg.LinAlgError):
+        return LightPrior((0.0, 0.0, 1.0), float(np.quantile(L, 0.02)))

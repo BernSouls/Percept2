@@ -521,6 +521,12 @@ def edge_association_strength(edge: Any, t: int) -> float:
     return float(getattr(edge, "weight", 0.0))
 
 
+#: Task 3 contour spine unification: PEAK_CHAIN is the primary contour spine;
+#: ContourLens is preserved intact behind this flag (default False) and may be
+#: re-enabled via ``P.CONTOUR_LENS_ENABLED = True``.
+CONTOUR_LENS_ENABLED: bool = False
+
+
 class ContourLens(HigherLens):
     """B.6 — V2 contour chains over Orientation segments.
 
@@ -557,6 +563,8 @@ class ContourLens(HigherLens):
         scale_level: int = 0,
     ) -> List[Detection]:
         self._canonical_mapped = 0
+        if not bool(getattr(P, "CONTOUR_LENS_ENABLED", CONTOUR_LENS_ENABLED)):
+            return []
         if extraction_scale <= 0.0:
             self._skipped_no_position += 1
             return []
@@ -620,18 +628,14 @@ class ContourLens(HigherLens):
         authorised: Set[Tuple[int, int]] = set()
         for nid in sorted({inst_nid[i] for i in inst_nid}):
             for edge in concept_graph.get_outgoing_edges(nid):
-                if edge.edge_type not in (
-                    EdgeType.ORIENTATION_CONTINUITY, EdgeType.CURVATURE
-                ):
+                if edge.edge_type != EdgeType.CONTINUITY:
                     continue
                 if edge_association_strength(edge, t) < P.THETA_CONTOUR_EDGE:
                     continue
                 if edge.child in nid_to_inst:
                     authorised.add((nid, edge.child))
             for edge in concept_graph.get_incoming_edges(nid):
-                if edge.edge_type not in (
-                    EdgeType.ORIENTATION_CONTINUITY, EdgeType.CURVATURE
-                ):
+                if edge.edge_type != EdgeType.CONTINUITY:
                     continue
                 if edge_association_strength(edge, t) < P.THETA_CONTOUR_EDGE:
                     continue
@@ -1138,7 +1142,11 @@ class JunctionLens(HigherLens):
                 current_detections.get("Orientation", []),
                 key=_detection_sort_key,
             )
-        if not orient_dets:
+        chain_dets = sorted(
+            current_detections.get("PEAK_CHAIN", []) or [],
+            key=_detection_sort_key,
+        )
+        if not orient_dets and not chain_dets:
             return []
 
         det_to_nid: Dict[int, int] = {}
@@ -1153,11 +1161,11 @@ class JunctionLens(HigherLens):
         pattern_edges: Set[Tuple[int, int]] = set()
         for nid in set(det_to_nid.values()):
             for edge in concept_graph.get_outgoing_edges(nid):
-                if edge.edge_type in (EdgeType.ORIENTATION_BEND, EdgeType.ORIENTATION_JUNCTION):
+                if edge.edge_type == EdgeType.JUNCTION:
                     pattern_edges.add((nid, edge.child))
                     pattern_edges.add((edge.child, nid))
             for edge in concept_graph.get_incoming_edges(nid):
-                if edge.edge_type in (EdgeType.ORIENTATION_BEND, EdgeType.ORIENTATION_JUNCTION):
+                if edge.edge_type == EdgeType.JUNCTION:
                     pattern_edges.add((edge.parent, nid))
                     pattern_edges.add((nid, edge.parent))
 
@@ -1222,6 +1230,7 @@ class JunctionLens(HigherLens):
             components.append(comp)
 
         emitted: List[Detection] = []
+        global_hubs: List[Tuple[float, float]] = []
         for comp in components:
             if len(comp) < 3:
                 continue
@@ -1339,6 +1348,7 @@ class JunctionLens(HigherLens):
                        for q in accepted_hubs):
                     continue
                 accepted_hubs.append((float(hub_pos[0]), float(hub_pos[1])))
+                global_hubs.append((float(hub_pos[0]), float(hub_pos[1])))
 
                 is_symmetric = (topo in (4, 5)) or (topo == 0 and n_ang == 2)
                 if is_symmetric or not ref_is_unambiguous:
@@ -1452,19 +1462,216 @@ class JunctionLens(HigherLens):
                         class_="JUNCTION",
                         relation="ANGLE_RELATION",
                         quantized=quantized,
-                        # [GRADED POPULATION] The CONTINUOUS junction
-                        # measurements the population was built from (the arm
-                        # count, the reference orientation, the topology class,
-                        # the normalised gap spread, the four arm gaps, the arm
-                        # support, the two arm-sharpness statistics and the
-                        # eight pairwise arm-angle counts).
                         population=_jn_pop,
                     ),
                     alpha=hub_anchor,
                     z=min(1.0, max(0.0, n_ang / max(float(P.JUNCTION_SATURATION_ARMS), 1e-9))),
                     t=t,
-                rho=tuple(rho),
+                    rho=tuple(rho),
                 ))
+
+        # Multi-chain PEAK_CHAIN junctions (Task 3 unified spine): detect
+        # T/Y/Corner meetings between distinct PEAK_CHAINs not already covered
+        # by a V1 hub within junction_radius.
+        if len(chain_dets) >= 2 and anchor_positions:
+            chain_verts: List[Tuple[Detection, int, List[Tuple[Any, Tuple[float, float]]], bool]] = []
+            for cd in chain_dets:
+                c_nid = concept_graph.get_or_create_pattern_node(
+                    cd.k, _node_signature_hash(cd.sigma), signature=cd.sigma
+                )
+                pts_c: List[Tuple[Any, Tuple[float, float]]] = []
+                for role in getattr(cd, "rho", ()) or ():
+                    if len(role) >= 2 and role[0] == "member":
+                        mp = anchor_positions.get(role[1])
+                        if mp is not None and len(mp) >= 2:
+                            pts_c.append((role[1], (float(mp[0]), float(mp[1]))))
+                if len(pts_c) >= 2:
+                    cq = cd.sigma.quantized
+                    is_cl = bool(len(cq) >= 4 and float(cq[3]) > 0.5)
+                    chain_verts.append((cd, c_nid, pts_c, is_cl))
+
+            cluster_tol = float(getattr(P, "JUNCTION_ARM_CLUSTER_TOL", math.pi / 36.0))
+            for idx_a, (cd_a, nid_a, pts_a, cl_a) in enumerate(chain_verts):
+                if cl_a:
+                    continue
+                for end_i, in_i in ((0, 1), (len(pts_a) - 1, len(pts_a) - 2)):
+                    end_anc, end_p = pts_a[end_i]
+                    _, in_p = pts_a[in_i]
+                    if any(_pos_dist(end_p, q) <= junction_radius for q in global_hubs):
+                        continue
+                    dx_stem = in_p[0] - end_p[0]
+                    dy_stem = in_p[1] - end_p[1]
+                    d_stem = math.hypot(dx_stem, dy_stem)
+                    if d_stem <= metric_epsilon:
+                        continue
+                    raw_arms: List[Tuple[float, Any, int, float]] = [
+                        (math.atan2(dy_stem, dx_stem) % (2.0 * math.pi), pts_a[in_i][0], nid_a, d_stem)
+                    ]
+                    partner_nids: List[int] = [nid_a]
+                    for idx_b, (_cd_b, nid_b, pts_b, cl_b) in enumerate(chain_verts):
+                        if idx_b == idx_a:
+                            continue
+                        best_k = -1
+                        best_d = junction_radius + 1.0
+                        for k_v, (_va, vp) in enumerate(pts_b):
+                            dv = _pos_dist(end_p, vp)
+                            if dv <= junction_radius and dv < best_d:
+                                best_d = dv
+                                best_k = k_v
+                        if best_k < 0:
+                            continue
+                        partner_nids.append(nid_b)
+                        nb = len(pts_b)
+                        hub_b = pts_b[best_k][1]
+                        if cl_b or (0 < best_k < nb - 1):
+                            prev_k = (best_k - 1) % nb
+                            next_k = (best_k + 1) % nb
+                            for nk in (prev_k, next_k):
+                                np_ = pts_b[nk][1]
+                                ddx, ddy = np_[0] - hub_b[0], np_[1] - hub_b[1]
+                                dd = math.hypot(ddx, ddy)
+                                if dd > metric_epsilon:
+                                    raw_arms.append((math.atan2(ddy, ddx) % (2.0 * math.pi), pts_b[nk][0], nid_b, dd))
+                        else:
+                            in_k = 1 if best_k == 0 else nb - 2
+                            np_ = pts_b[in_k][1]
+                            ddx, ddy = np_[0] - hub_b[0], np_[1] - hub_b[1]
+                            dd = math.hypot(ddx, ddy)
+                            if dd > metric_epsilon:
+                                raw_arms.append((math.atan2(ddy, ddx) % (2.0 * math.pi), pts_b[in_k][0], nid_b, dd))
+                    if len(partner_nids) < 2:
+                        continue
+                    c_pairs = _arm_bearing_clusters(raw_arms, cluster_tol)
+                    n_ang = len(c_pairs)
+                    if n_ang < 2:
+                        continue
+                    self._candidates_evaluated += 1
+                    c_pairs.sort(key=lambda p: (p[0], serialize_value(p[1])))
+                    angles = [p[0] for p in c_pairs]
+                    member_anchors = [p[1] for p in c_pairs]
+                    arm_nids = [p[2] for p in c_pairs]
+                    gaps = [(angles[(i + 1) % n_ang] - angles[i]) % (2.0 * math.pi) for i in range(n_ang)]
+                    gap_bins_for_sort = [
+                        math.floor(g * _JUNCTION_CANONICAL_BINS / (2.0 * math.pi))
+                        for g in gaps
+                    ]
+                    rotations = [tuple(gap_bins_for_sort[i:] + gap_bins_for_sort[:i]) for i in range(n_ang)]
+                    min_seq = min(rotations)
+                    indices = [i for i, r in enumerate(rotations) if r == min_seq]
+                    min_shift = indices[0]
+                    ref_is_unambiguous = len(indices) == 1
+                    angles = angles[min_shift:] + angles[:min_shift]
+                    gaps = gaps[min_shift:] + gaps[:min_shift]
+                    member_anchors = member_anchors[min_shift:] + member_anchors[:min_shift]
+                    arm_nids = arm_nids[min_shift:] + arm_nids[:min_shift]
+                    ref_theta = angles[0]
+                    topo = 0
+                    if n_ang == 2:
+                        gap = min(gaps[0], 2.0 * math.pi - gaps[0])
+                        topo = 0 if abs(gap - math.pi) < P.JUNCTION_COLLINEAR_TOL else 1
+                    elif n_ang == 3:
+                        tol = P.JUNCTION_COLLINEAR_TOL
+                        if any(abs(g - math.pi) < tol for g in gaps):
+                            topo = 2
+                        elif max(gaps) > math.pi + tol:
+                            topo = 6
+                        else:
+                            topo = 3
+                    elif n_ang == 4:
+                        diff_0_2 = (angles[2] - angles[0]) % (2.0 * math.pi)
+                        diff_1_3 = (angles[3] - angles[1]) % (2.0 * math.pi)
+                        topo = 4 if (
+                            abs(diff_0_2 - math.pi) < P.JUNCTION_COLLINEAR_TOL
+                            and abs(diff_1_3 - math.pi) < P.JUNCTION_COLLINEAR_TOL
+                        ) else 0
+                    if _is_pass_through(topo, n_ang):
+                        continue
+                    global_hubs.append(end_p)
+                    is_symmetric = (topo in (4, 5)) or (topo == 0 and n_ang == 2)
+                    if is_symmetric or not ref_is_unambiguous:
+                        ref_theta_bin = 0.0
+                        emit_ref_arm = False
+                    else:
+                        ref_theta_bin = float(quantise(_JUNCTION_SPEC["ref_theta"], float(ref_theta)))
+                        emit_ref_arm = True
+                    expected_gap = (2.0 * math.pi) / n_ang
+                    spread = sum((g - expected_gap) ** 2 for g in gaps) / n_ang
+                    var_max = (2.0 * math.pi) ** 2 * (1.0 - 1.0 / n_ang) / n_ang
+                    spread_norm = spread / var_max if var_max > 1e-9 else 0.0
+                    spread_bin = float(quantise(_JUNCTION_SPEC["spread"], float(spread_norm)))
+                    n_branches_bin = float(quantise(_JUNCTION_SPEC["degree"], float(n_ang)))
+                    gap_bins = [
+                        float(quantise(_JUNCTION_SPEC[f"gap{i}"], float(gaps[i] if i < n_ang else 0.0)))
+                        for i in range(4)
+                    ]
+                    pair_hist = [0] * 8
+                    for ia in range(n_ang):
+                        for ib in range(ia + 1, n_ang):
+                            d = abs(angles[ia] - angles[ib]) % (2.0 * math.pi)
+                            d = min(d, 2.0 * math.pi - d)
+                            pair_hist[min(7, int(d / math.pi * 8))] += 1
+                    pair_hist_f = [
+                        float(quantise(_JUNCTION_SPEC[f"arm_angle{i}"], float(c)))
+                        for i, c in enumerate(pair_hist)
+                    ]
+                    support = 2.0
+                    sharp_mean = 1.0
+                    sharp_min = 1.0
+                    extra = (
+                        float(quantise(_JUNCTION_SPEC["arm_support"], support)),
+                        float(quantise(_JUNCTION_SPEC["arm_sharp_mean"], sharp_mean)),
+                        float(quantise(_JUNCTION_SPEC["arm_sharp_min"], sharp_min)),
+                    ) + tuple(pair_hist_f)
+                    quantized = (
+                        n_branches_bin,
+                        ref_theta_bin,
+                        float(quantise(_JUNCTION_SPEC["topo"], float(topo))),
+                        spread_bin,
+                        gap_bins[0],
+                        gap_bins[1],
+                        gap_bins[2],
+                        gap_bins[3],
+                    ) + extra
+                    _jn_pop = population_from_values(
+                        "JUNCTION",
+                        (float(n_ang),
+                         float(ref_theta) if emit_ref_arm else 0.0,
+                         float(topo), float(spread_norm),
+                         float(gaps[0] if n_ang > 0 else 0.0),
+                         float(gaps[1] if n_ang > 1 else 0.0),
+                         float(gaps[2] if n_ang > 2 else 0.0),
+                         float(gaps[3] if n_ang > 3 else 0.0),
+                         support, sharp_mean, sharp_min)
+                        + tuple(float(c) for c in pair_hist),
+                    )
+                    node_kind = (
+                        junction_family(topo, n_ang)
+                        if getattr(P, "JUNCTION_FAMILY_SPLIT", True)
+                        else JUNCTION_RESIDUAL_KIND
+                    )
+                    rho_c = [("entity", end_anc, 0, "+")]
+                    if emit_ref_arm:
+                        rho_c.append(("ref_arm", member_anchors[0], 0, "+"))
+                    for i, a in enumerate(member_anchors):
+                        rho_c.append(("member", a, i, "+"))
+                    for i, cn in enumerate(sorted(set(arm_nids))):
+                        rho_c.append(("member_node", (cn,), i, "+"))
+                    emitted.append(Detection(
+                        k=node_kind,
+                        source_layer=1,
+                        scale=0,
+                        sigma=TypedSignature(
+                            kind="CANONICAL",
+                            class_="JUNCTION",
+                            relation="ANGLE_RELATION",
+                            quantized=quantized,
+                            population=_jn_pop,
+                        ),
+                        alpha=end_anc,
+                        z=min(1.0, max(0.0, n_ang / max(float(P.JUNCTION_SATURATION_ARMS), 1e-9))),
+                        t=t,
+                        rho=tuple(rho_c),
+                    ))
 
         self._emitted_total += len(emitted)
         return emitted

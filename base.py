@@ -18,8 +18,8 @@ Plus the B2 first-class Action lens (an eighth, non-homeostatic channel):
                node (OPAQUE exact-identity signature). Emitted for the
                previous step's action; its ONSET is pre-registered at
                execution time by the Pipeline (Binder.note_executed_action)
-               so SEQUENCE edges attribute effects to the action that
-               caused them. Vocabulary recovery for آ§5.3.4 replay reads
+               without creating a temporal edge. The exact action
+               identity remains available for replay. Vocabulary recovery for آ§5.3.4 replay reads
                the ConceptGraph action-alpha registry keyed by the lens's
                pattern nodes.
 
@@ -167,8 +167,8 @@ _LENS_NAMES: Tuple[str, ...] = (
 # (lenses.py, _emit), so adding entries here is the entire change.
 #
 # Self-audit: Position, Motion, Boundary, and Orientation are the same
-# class of field-tiling channel. Position feeds DEGREE/TOPOLOGY/CONTACT;
-# Motion feeds CO_MOTION; Boundary feeds Rule-2 family resolution;
+# class of field-tiling channel. Position supports spatial relations;
+# Motion contributes common-fate evidence to MATERIAL; Boundary feeds Rule-2 family resolution;
 # Orientation is cap-bound on every raw image (investigation آ§2). All
 # four are included here.
 _DEFAULT_LENS_DETECTION_CAP = 64  # unchanged; retains legacy semantics
@@ -902,18 +902,11 @@ class LensExecutor:
         """Construct the Action-lens Detection for `action` at step `t`,
         or None if the action is not lens-eligible.
 
-        Public because the Pipeline pre-registers the action pattern's
-        ONSET at execution time (end of step t, via
-        Binder.note_executed_action) so that SEQUENCE edges attribute the
-        effect patterns onsetting at t+1 to the action that caused them
-        (lag = 1). Emitting only at t+1 â€” when the lens observes
-        a_prev â€” would onset the action pattern in the SAME step as its
-        effects; SEQUENCE requires strictly positive lag, so the
-        actionâ†’effect edge could never form and the action would instead
-        be misattributed as the parent of the NEXT step's effects. The
-        pre-registration and this emission produce the identical pattern
-        key (lens name + OPAQUE signature hash of the exact action), so
-        the t+1 emission extends presence without re-onsetting.
+        The Pipeline pre-registers this exact action pattern at execution
+        time (end of step t, via Binder.note_executed_action), then the
+        Action lens emits the same signature at t+1. This preserves the
+        action's graph presence and vocabulary identity; it creates no
+        temporal edge.
 
         Deliberate divergence from _emit (آ§2.7 homeostasis): the Action
         lens is a categorical RECORD of the agent's own output, not a
