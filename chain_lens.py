@@ -395,26 +395,3 @@ class ChainLens(HigherLens):
 
         self._emitted_total += len(emitted)
         return emitted
-
-
-if __name__ == "__main__":
-    import sys
-
-    def _selftest() -> int:
-        import perception.observation_2d as obs_mod
-
-        img = np.zeros((64, 64, 3), dtype=np.float32)
-        for i in range(8, 56):
-            img[32, i, 0] = 1.0
-        obs = obs_mod.Observation2D.from_image(
-            img, contours=None, rich=False
-        )
-        lens = ChainLens()
-        dets = lens.step(0, None, None, {}, None, {}, observation=obs)
-        print("emitted=%d diagnostics=%s"
-              % (len(dets), lens.get_diagnostics()))
-        for d in dets[:3]:
-            print(" ", d.sigma.quantized, "rho=%d" % len(d.rho))
-        return 0
-
-    sys.exit(_selftest())

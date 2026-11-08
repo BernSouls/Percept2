@@ -186,8 +186,8 @@ def border_ownership_claims_directed(
     figure when the signed value is >= 0, otherwise the named neighbour is.
     Exactly one direction per unordered pair survives -- the one with the
     greater total evidence, ties broken by repr order -- so the emitted
-    OCCLUSION edge is figure -> ground (near -> far) with no contradictory
-    back-edge.
+    negative-sign OCCLUSION (source_cue=3) is directed figure -> ground;
+    positive sign remains reserved for ordinary near -> far depth.
     """
     from perception.ownership import ownership_signed
     if min_strength is None:
