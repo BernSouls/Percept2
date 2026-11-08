@@ -168,7 +168,9 @@ _LENS_NAMES: Tuple[str, ...] = (
 #
 # Self-audit: Position, Motion, Boundary, and Orientation are the same
 # class of field-tiling channel. Position supports spatial relations;
-# Motion contributes common-fate evidence to MATERIAL; Boundary feeds Rule-2 family resolution;
+# Motion detections remain available to observation/state logic; the
+# co-motion edge emitter is gated off until a video-backed representation
+# is approved. Boundary feeds Rule-2 family resolution;
 # Orientation is cap-bound on every raw image (investigation آ§2). All
 # four are included here.
 _DEFAULT_LENS_DETECTION_CAP = 64  # unchanged; retains legacy semantics

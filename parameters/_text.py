@@ -1299,16 +1299,15 @@ POOL_SIGMA_FLOOR: float = 0.10
 
 
 # --- SURFACE_GROUPING binder (v8) ---
-# Color distance scale (RGB in [0, 1]³). Signal term exp(-d/σ_c).
+# Appearance similarity scales for bin-center-normalized color/texture slots.
 SURFACE_GROUPING_SIGMA_C = 0.2
-# Texture distance scale (2-dim quantized roughness/isotropy in [0, 1]²).
 SURFACE_GROUPING_SIGMA_T = 0.3
-# Absolute floor: candidate pairs below this raw signal are dropped
-# before max-normalization.
 SURFACE_GROUPING_MIN_SIGNAL = 0.05
-# Spread gate: if max(signal) - min(signal) across candidates is below
-# this, no edges are emitted (all-equal means nothing to discriminate).
 SURFACE_GROUPING_SPREAD_MIN = 0.05
+# Surface grouping is local and requires available normal and material cues.
+SURFACE_GROUPING_RADIUS_MULT = 1.5
+SURFACE_GROUPING_MAX_NORMAL_DEG = 30.0
+SURFACE_GROUPING_MAX_MATERIAL_DIFF = 0.30
 
 # =============================================================================
 # 13. EXTRACTION: BINDERS (order-1)

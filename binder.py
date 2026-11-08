@@ -1,23 +1,13 @@
 """binder.py — Canonical binder module for Blueprint v31.
 
-Implements §2.3: ten binders producing relations between two or more
-distinct entities. Every binder compares lens-produced pattern nodes and emits
-an order-1 edge. There are NO order-2 edge types: structural similarity is a
-measurement of the graph the binders already produced, not an observed
-relation, so it lives in structural_similarity.py (§1.5/§4.12) and emits
-nothing.
-
-Order-1:
-    Co-activation   A and B fire in the same step          (undirected)
-    Transition      A onsets at t, B onsets at t+1          (directed)
-    Co-motion       A and B move together                   (undirected)
-    Contrast        B appears iff A is present              (directed)
-    Periodicity     A recurs with interval T relative to B  (undirected)
-    Persistence     A stable while B changes                (directed)
-    Topology        B is one of A's K nearest neighbors     (directed)
-    Degree          B is within radius R of A               (undirected)
-    Contact         A contacts B                            (undirected)
-    Sequence        A precedes B with age decay             (directed)
+Implements the current within-frame relational emitters over lens-produced
+pattern nodes. The canonical `EdgeType` taxonomy has exactly eight spatial
+categories; temporal `ConceptFamily` and action/schema values remain in the
+graph model, but Binder emits no temporal edge categories. Kinematic co-motion
+is gated off until video input and an approved edge representation exist.
+There are NO order-2 edge types: structural similarity measures the graph the
+binders already produced rather than observing a new relation, so it lives in
+structural_similarity.py (§1.5/§4.12) and emits nothing.
 
 Determinism
 -----------
@@ -48,7 +38,6 @@ from core.schema import edge_params as _edge_params  # noqa: F401
 from core.slots import (  # noqa: F401
     orientation_theta_radians,
     slot_value,
-    slot_values,
 )
 from core.spatial import SpatialHash  # noqa: F401
 import parameters as P
@@ -178,6 +167,7 @@ from core.types import (  # noqa: F401
     UNDIRECTED_EDGE_TYPES,
 )
 from core.registries import (  # noqa: F401
+    POPULATION_SLOTS,
     SELF_BINDER_TYPES,
 )
 from core.hashing import (  # noqa: F401
@@ -227,8 +217,9 @@ def _map_family(
         Same lens type, two or more distinct substrates.
 
     Concept-derived sequence/structure lenses are not emitted. Spatial
-    relations use the eight canonical edge categories; co-motion and signed
-    anti-phase evidence are represented through MATERIAL, not temporal edges.
+    relations use the eight canonical edge categories. Kinematic co-motion is
+    gated off without an approved edge representation; negative segregation
+    evidence remains signed OCCLUSION rather than MATERIAL.
 
     Returns None if no rule matches; the candidate is a scaffold and MUST
     NOT be emitted as a CrossSection.
@@ -849,6 +840,31 @@ def _get_orientation_theta(det: Detection, n_theta: int = 24) -> Optional[float]
     return None
 
 
+def _normalized_signature_slots(
+    signature: TypedSignature,
+    class_name: str,
+    names: Tuple[str, ...],
+) -> Optional[Tuple[float, ...]]:
+    """Normalize named quantized slots to bin centers in [0, 1]."""
+    specs = POPULATION_SLOTS.get(class_name, ())
+    q = tuple(getattr(signature, "quantized", ()) or ())
+    index = {spec.name: i for i, spec in enumerate(specs)}
+    out = []
+    for name in names:
+        i = index.get(name)
+        if i is None or i >= len(q):
+            return None
+        n_bins = max(1, int(specs[i].n_bins))
+        try:
+            value = (float(q[i]) + 0.5) / n_bins
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        out.append(max(0.0, min(1.0, value)))
+    return tuple(out)
+
+
 def _surface_normal(det: Detection) -> Optional[Tuple[float, float, float]]:
     """Surface normal from a Surface detection's boundary-gradient cue.
 
@@ -1322,9 +1338,10 @@ class Binder:
         )
         """Run all binders for step t. Writes edges into the concept graph.
 
-        anchor_positions and anchor_velocities are keyed by anchor. Position-
-        and velocity-derived spatial emitters skip if their required context
-        is missing; co-motion is routed into MATERIAL. See D6.
+        anchor_positions and anchor_velocities are keyed by anchor. Spatial
+        emitters skip if their required context is missing. Kinematic co-motion
+        is disabled until a video input and an approved edge representation
+        exist; anti-phase figure-ground evidence uses signed OCCLUSION.
         """
         # [PHASE B] B.3: the Pipeline brackets a step with note_step_begin()
         # and finalize_step(). Callers that drive Binder.step() directly
@@ -1373,7 +1390,7 @@ class Binder:
             self._remember_node_position(_nid, _d.alpha)
 
         # Order-1 spatial channels (all 7 temporal channels deleted).
-        self._run_co_motion(dets, node_ids, anchor_velocities)
+        # Co-motion has no video-backed, approved EdgeType representation yet.
         self._run_motion_opposition(
             dets, node_ids, anchor_positions, anchor_velocities
         )
@@ -1384,7 +1401,7 @@ class Binder:
         self._run_topology(dets, node_ids, anchor_positions)
         self._run_degree(dets, node_ids, anchor_positions)
         self._run_contact(dets, node_ids, anchor_positions)
-        self._run_stream_binding(dets, node_ids)
+        self._run_stream_binding(dets, node_ids, anchor_positions)
         self._run_orientation_continuity(dets, node_ids, anchor_positions)
         self._run_surface_grouping(dets, node_ids, anchor_positions)
         self._run_curvature(dets, node_ids, anchor_positions)
@@ -2304,8 +2321,9 @@ class Binder:
         the pair is emitted figure -> ground: the figure side owns the border
         and the ground side sits behind it, which separates them rather than
         binding them. Positive containment/ownership edges are emitted by
-        their own readers; this complementary repulsion is routed to signed
-        MATERIAL so OCCLUSION remains positive and directed near -> far.
+        their own readers; this complementary repulsion is emitted as
+        negative-sign OCCLUSION (source_cue=3), distinct from positive
+        near-to-far depth claims.
         """
         if not bool(P.ANTIPHASE_ENABLED):
             return
@@ -2330,26 +2348,25 @@ class Binder:
             u, v = anchor_nid.get(a), anchor_nid.get(b)
             if u is None or v is None:
                 self.diagnostics["anti_phase_unresolved_endpoints"][
-                    EdgeType.MATERIAL.name] += 1
+                    EdgeType.OCCLUSION.name] += 1
                 continue
             if u == v:
                 continue
             a_id, b_id = u, v            # directed: figure -> ground
-            # The signed separation candidate is routed by _process_channel
-            # from the temporary OCCLUSION writer into MATERIAL. It carries no
-            # ordinal-depth measurement; OCCLUSION itself remains sign=+1.
+            # This is repulsive figure-ground evidence, not an ordinal depth
+            # measurement. Keep it as negative OCCLUSION with source_cue=3.
             ep = _edge_params(
                 "EDGE_OCCLUSION",
-                {"depth": 0.0, "stack_depth": 8.0, "source": 0.0,
-                 "depth_units": None},
+                {"depth_diff": 0.0, "source_cue": 3.0,
+                 "strength": float(strength)},
                 sign=-1,
                 confidence=float(clamp(strength, 0.0, 1.0)),
             )
             candidates.append((a_id, b_id, strength, (a_id, b_id), ep))
         self.diagnostics["anti_phase_pairs_offered"][
-            EdgeType.MATERIAL.name] += len(pairs)
+            EdgeType.OCCLUSION.name] += len(pairs)
         self.diagnostics["anti_phase_candidates"][
-            EdgeType.MATERIAL.name] += len(candidates)
+            EdgeType.OCCLUSION.name] += len(candidates)
         self._process_channel(EdgeType.OCCLUSION, candidates)
 
     @staticmethod
@@ -2375,7 +2392,8 @@ class Binder:
         Every other detection whose anchor falls strictly inside its member
         ring sits behind it on another depth layer, so the ring (exterior)
         and the interior are separated, not bound. The signed candidate is
-        routed to MATERIAL with confidence equal to measured containment depth.
+        negative OCCLUSION with confidence equal to measured containment
+        strength; it does not claim an ordinal depth difference.
         """
         if not bool(P.ANTIPHASE_ENABLED):
             return
@@ -2403,27 +2421,27 @@ class Binder:
             u, v = anchor_nid.get(ring_anchor), anchor_nid.get(inner_anchor)
             if u is None or v is None:
                 self.diagnostics["anti_phase_unresolved_endpoints"][
-                    EdgeType.MATERIAL.name] += 1
+                    EdgeType.OCCLUSION.name] += 1
                 continue
             if u == v:
                 continue
             if depth < float(P.ANTIPHASE_MIN_CONFIDENCE):
                 continue
             a_id, b_id = u, v            # directed: enclosing ring (near) -> interior (far)
-            # The signed separation is a MATERIAL relation; do not encode
-            # containment fraction as an ordinal OCCLUSION depth.
+            # Preserve repulsive figure-ground evidence in OCCLUSION without
+            # treating the containment fraction as ordinal depth.
             ep = _edge_params(
                 "EDGE_OCCLUSION",
-                {"depth": 0.0, "stack_depth": 8.0, "source": 1.0,
-                 "depth_units": None},
+                {"depth_diff": 0.0, "source_cue": 3.0,
+                 "strength": float(depth)},
                 sign=-1,
                 confidence=float(clamp(depth, 0.0, 1.0)),
             )
             candidates.append((a_id, b_id, depth, (a_id, b_id), ep))
         self.diagnostics["anti_phase_pairs_offered"][
-            EdgeType.MATERIAL.name] += len(pairs)
+            EdgeType.OCCLUSION.name] += len(pairs)
         self.diagnostics["anti_phase_candidates"][
-            EdgeType.MATERIAL.name] += len(candidates)
+            EdgeType.OCCLUSION.name] += len(candidates)
         self._process_channel(EdgeType.OCCLUSION, candidates)
 
     def _run_curvature_sign_continuity(
@@ -2718,34 +2736,33 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """V2 surface adjacency: bind Surface patches close enough to share
-        an interface (Cortical surface representations bind adjacent regions
-        across a shared boundary). Undirected.
-
-        The congruence slot reports whether the two patches disagree on the
-        field at index 6 (-> bin 7.0) or agree/are silent (-> bin 0.0),
-        so opposite-handed neighbours are still linked but distinguishable.
-        A short signature reads as neutral rather than raising.
-        """
+        """Bind nearby Surface patches only with normal/material agreement."""
         surf_dets = sorted(
             [d for d in dets if d.k == "Surface"], key=_detection_sort_key
         )
         if len(surf_dets) < 2 or not anchor_positions:
             return
         r_scale = max(self._step_extraction_scale, 1.0)
+        max_normal_angle = math.radians(
+            float(P.SURFACE_GROUPING_MAX_NORMAL_DEG))
+        max_material_diff = float(P.SURFACE_GROUPING_MAX_MATERIAL_DIFF)
         candidates: List[
             Tuple[int, int, float, Tuple[int, int], EdgeParams]
         ] = []
-        for i in range(len(surf_dets)):
-            a = surf_dets[i]
+        for i, a in enumerate(surf_dets):
             pa = anchor_positions.get(a.alpha)
-            if pa is None or a not in node_ids:
+            normal_a = _surface_normal(a)
+            if pa is None or normal_a is None or a not in node_ids:
                 continue
             u = node_ids[a]
-            for j in range(i + 1, len(surf_dets)):
-                b = surf_dets[j]
+            mat_a = _normalized_signature_slots(
+                a.sigma, "SURFACE_PATCH", ("lum", "hue", "sat", "tex"))
+            if mat_a is None:
+                continue
+            for b in surf_dets[i + 1:]:
                 pb = anchor_positions.get(b.alpha)
-                if pb is None or b not in node_ids:
+                normal_b = _surface_normal(b)
+                if pb is None or normal_b is None or b not in node_ids:
                     continue
                 v = node_ids[b]
                 if u == v:
@@ -2753,24 +2770,39 @@ class Binder:
                 dist = _pos_dist(pa, pb)
                 if dist > 2.5 * r_scale:
                     continue
-                signal = math.exp(-dist / (2.0 * r_scale))
-                # [P2] THE NAMED WRITER: the separation in WAVELENGTHS and
-                # the CONGRUENCE as a categorical lookup key (the patches
-                # either agree on the field or they do not; there is no
-                # graded quantity behind that statement, so none is
-                # invented).
-                dist_w = dist / max(r_scale, 1e-6)
-                qa, qb = a.sigma.quantized, b.sigma.quantized
-                congruence = (
-                    7.0
-                    if len(qa) > 6 and len(qb) > 6
-                    and abs(qa[6] - qb[6]) > 0.5
-                    else 0.0
-                )
+                dot = clamp(sum(normal_a[k] * normal_b[k] for k in range(3)),
+                            -1.0, 1.0)
+                normal_angle = math.acos(dot)
+                if normal_angle > max_normal_angle:
+                    continue
+                mat_b = _normalized_signature_slots(
+                    b.sigma, "SURFACE_PATCH", ("lum", "hue", "sat", "tex"))
+                if mat_b is None:
+                    continue
+                lum_diff = abs(mat_a[0] - mat_b[0])
+                hue_delta = abs(mat_a[1] - mat_b[1])
+                hue_diff = 2.0 * min(hue_delta, 1.0 - hue_delta)
+                sat_diff = abs(mat_a[2] - mat_b[2])
+                tex_diff = abs(mat_a[3] - mat_b[3])
+                material_diff = max(lum_diff, hue_diff, sat_diff, tex_diff)
+                if material_diff > max_material_diff:
+                    continue
+
+                normal_similarity = math.exp(
+                    -normal_angle / max(max_normal_angle, 1e-6))
+                material_similarity = 1.0 - material_diff
+                signal = (math.exp(-dist / (2.0 * r_scale))
+                          * normal_similarity * material_similarity)
+                if signal <= 0.0:
+                    continue
                 src, dst = (u, v) if u < v else (v, u)
+                dist_w = dist / max(r_scale, 1e-6)
                 ep = _edge_params(
                     "EDGE_SHARED_BOUNDARY",
-                    {"dist": dist_w, "congruence": congruence},
+                    {"normal_angle": normal_angle,
+                     "material_diff": material_diff,
+                     "slant_diff": None,
+                     "dist": dist_w},
                     sign=1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
@@ -3050,11 +3082,17 @@ class Binder:
                 spatial = math.exp(-dist / (1.5 * r_scale))
                 pair_conf = min(conf_a, conf_b)
 
-                if (dihedral is not None and slant_diff is not None
+                material_compatible = (
+                    material_diff is not None
+                    and material_diff <= P.SURFACE_GROUPING_MAX_MATERIAL_DIFF
+                )
+                if (material_compatible
+                        and dihedral is not None and slant_diff is not None
                         and (dihedral >= math.pi / 12.0
                              or slant_diff >= math.pi / 18.0)):
                     strength = max(dihedral / math.pi, slant_diff / (math.pi / 2.0))
-                    signal = spatial * max(0.0, min(1.0, strength))
+                    signal = (spatial * max(0.0, min(1.0, strength))
+                              * (1.0 - material_diff))
                     if signal > 0.01:
                         ep = _edge_params(
                             "EDGE_SURFACE_FOLD",
@@ -3105,8 +3143,26 @@ class Binder:
                     src, dst = (na, nb) if na < nb else (nb, na)
                     material_candidates.append((src, dst, signal, (src, dst), ep))
 
-        # Legacy two-dimensional Surface cues remain a fallback; the live
-        # 2.5D path above is the only source of full dihedral/depth/material.
+        # Legacy two-dimensional Surface cues remain a fallback only when
+        # co-located Color/Texture measurements provide material evidence.
+        legacy_colors: Dict[Any, Tuple[float, float, float]] = {}
+        legacy_textures: Dict[Any, Tuple[float, float]] = {}
+        for d in dets:
+            if d.k == "Color" and len(d.sigma.quantized) >= 3:
+                if getattr(d.sigma, "class_", "") == "COLOR_LEGACY":
+                    values = _normalized_signature_slots(
+                        d.sigma, "COLOR_LEGACY", ("r", "g", "b"))
+                else:
+                    values = _normalized_signature_slots(
+                        d.sigma, "COLOR", ("lum", "rg", "by"))
+                if values is not None:
+                    legacy_colors[d.alpha] = values
+            elif d.k == "Texture" and len(d.sigma.quantized) >= 2:
+                values = _normalized_signature_slots(
+                    d.sigma, "TEXTURE", ("roughness", "isotropy"))
+                if values is not None:
+                    legacy_textures[d.alpha] = values
+
         legacy = []
         for d in dets:
             if d.k != "Surface":
@@ -3115,10 +3171,24 @@ class Binder:
             nid = node_ids.get(d)
             normal = _surface_normal(d)
             if pos is not None and nid is not None and normal is not None:
-                legacy.append((pos, nid, normal))
-        for i, (pos_a, nid_a, n_a) in enumerate(legacy):
-            for pos_b, nid_b, n_b in legacy[i + 1:]:
+                legacy.append((d.alpha, pos, nid, normal))
+        for i, (alpha_a, pos_a, nid_a, n_a) in enumerate(legacy):
+            for alpha_b, pos_b, nid_b, n_b in legacy[i + 1:]:
                 if nid_a == nid_b:
+                    continue
+                material_diffs = []
+                if alpha_a in legacy_colors and alpha_b in legacy_colors:
+                    ca, cb = legacy_colors[alpha_a], legacy_colors[alpha_b]
+                    d_c = math.sqrt(sum((x - y) ** 2 for x, y in zip(ca, cb)))
+                    material_diffs.append(min(1.0, d_c / math.sqrt(3.0)))
+                if alpha_a in legacy_textures and alpha_b in legacy_textures:
+                    ta, tb = legacy_textures[alpha_a], legacy_textures[alpha_b]
+                    d_t = math.sqrt(sum((x - y) ** 2 for x, y in zip(ta, tb)))
+                    material_diffs.append(min(1.0, d_t / math.sqrt(2.0)))
+                if not material_diffs:
+                    continue
+                material_diff = max(material_diffs)
+                if material_diff > P.SURFACE_GROUPING_MAX_MATERIAL_DIFF:
                     continue
                 dist = _pos_dist(pos_a, pos_b)
                 if dist > 2.5 * r_scale:
@@ -3127,11 +3197,13 @@ class Binder:
                 dihedral = math.acos(dot)
                 if dihedral < math.pi / 12.0:
                     continue
-                signal = (dihedral / math.pi) * math.exp(-dist / (1.5 * r_scale))
+                signal = ((dihedral / math.pi)
+                          * math.exp(-dist / (1.5 * r_scale))
+                          * (1.0 - material_diff))
                 ep = _edge_params(
                     "EDGE_SURFACE_FOLD",
-                    {"dihedral": dihedral, "fold_axis": 0.0,
-                     "convexity": 1.0, "sharpness": dihedral / math.pi},
+                    {"normal_angle": dihedral, "material_diff": material_diff,
+                     "slant_diff": None},
                     sign=1,
                     confidence=1.0,
                 )
@@ -3557,13 +3629,14 @@ class Binder:
                         "speed_contrast": speed_rel,
                         "boundary_angle": boundary,
                         "speed": mean_speed / max(P.MOTION_SPEED_MAX, 1e-6),
+                        "source_cue": 3.0,
                     },
                     sign=-1,
                     confidence=float(clamp(signal, 0.0, 1.0)),
                 )
                 candidates.append((src, dst, signal, (src, dst), ep))
 
-        self._process_channel(EdgeType.MATERIAL, candidates)
+        self._process_channel(EdgeType.OCCLUSION, candidates)
 
     def _run_cross_scale_identity(
         self,
@@ -3982,7 +4055,14 @@ class Binder:
 
         sign = int(getattr(params, "sign", 1) or 1)
         if edge_type == EdgeType.OCCLUSION:
-            sign = 1  # directed near -> far order is never a signed repulsion
+            # Positive is ordinary near -> far depth; negative is explicit
+            # figure-ground segregation. Never normalize the latter away.
+            sign = -1 if sign < 0 else 1
+        elif edge_type == EdgeType.MATERIAL and source in {
+                "EDGE_CO_MOTION", "EDGE_MOTION_OPPOSITION"}:
+            raise ValueError(
+                "kinematic evidence cannot be canonicalized as MATERIAL"
+            )
         confidence = min(
             self._node_z.get(src, 0.0),
             self._node_z.get(dst, 0.0),
@@ -4064,8 +4144,9 @@ class Binder:
         elif edge_type == EdgeType.OCCLUSION:
             depth = _value("depth_diff", "depth_units", "dz", "depth",
                            "stack_depth", "gap")
-            source_cue = _value("source_cue", "source", "junction_type",
-                                "topology_class", default=0.0)
+            source_cue = (3.0 if sign < 0 else
+                          _value("source_cue", "source", "junction_type",
+                                 "topology_class", default=0.0))
             strength = _value("strength", "confidence", default=signal)
             values = {
                 "depth_diff": _clamp(abs(depth) if depth is not None else None, 0.0, 4.0),
@@ -4140,15 +4221,13 @@ class Binder:
                 "radial_ratio": _clamp(abs(radial) if radial is not None else None, 0.0, 3.0),
                 "curvature": _clamp(curvature, -1.0, 1.0),
             }
-        else:  # MATERIAL
+        else:  # MATERIAL: appearance evidence only (never motion/kinematics)
             chrom = _value("chrom_diff", "chroma_diff", "contrast",
-                           "opp_angle", "dir_contrast", "angle_diff",
-                           "hue_diff", "color_dist")
-            lum = _value("lum_diff", "lum_indep", "speed_contrast",
-                         "speed_ratio", "mean_speed", "contrast_step")
+                           "opp_angle", "hue_diff", "color_dist")
+            lum = _value("lum_diff", "lum_indep", "contrast_step")
             tex = _value("tex_diff", "tex_dist", "texture_diff", "similarity",
-                         "extent", "spatial_dist", "speed")
-            if any(k in raw for k in ("opp_angle", "dir_contrast", "angle_diff", "hue_diff")) and chrom is not None:
+                         "extent", "spatial_dist")
+            if any(k in raw for k in ("opp_angle", "hue_diff")) and chrom is not None:
                 chrom = chrom / math.pi
             if "similarity" in raw and tex is not None:
                 tex = 1.0 - tex
@@ -4177,21 +4256,6 @@ class Binder:
         keys and M_prev changes accumulate until finalize_step(), which advances
         each of the eight category homeostats exactly once.
         """
-        # Anti-phase figure-ground repulsion is not an ordinal depth claim.
-        # Keep it in MATERIAL's signed relation lane so OCCLUSION remains
-        # strictly directed near -> far with sign +1.
-        if edge_type == EdgeType.OCCLUSION:
-            repulsion, ordinal = [], []
-            for cand in candidates:
-                ep = cand[4] if len(cand) > 4 else None
-                if int(getattr(ep, "sign", 1) or 1) < 0:
-                    repulsion.append(cand)
-                else:
-                    ordinal.append(cand)
-            if repulsion:
-                self._process_channel(EdgeType.MATERIAL, repulsion)
-            candidates = ordinal
-
         state = self.channels[edge_type]
         acc = self._channel_step[edge_type]
         self.diagnostics["candidates_by_type"][edge_type.name] += len(candidates)
@@ -4220,6 +4284,10 @@ class Binder:
         for cand in candidates:
             src, dst, signal, key = cand[0], cand[1], float(cand[2]), cand[3]
             params = cand[4] if len(cand) > 4 else None
+            if edge_type == EdgeType.OCCLUSION:
+                relation_sign = -1 if int(
+                    getattr(params, "sign", 1) or 1) < 0 else 1
+                key = ("OCCLUSION", relation_sign, key)
             if (edge_type in UNDIRECTED_EDGE_TYPES and isinstance(key, tuple)
                     and len(key) >= 2 and isinstance(key[0], int)
                     and isinstance(key[1], int) and key[0] > key[1]):
@@ -4260,82 +4328,6 @@ class Binder:
         self.diagnostics["dropped_below_threshold"][edge_type.name] += (
             len(candidates) - len(passing)
         )
-
-    # -------------------------------------------------------------------------
-    # Co-motion (undirected) — D6
-    # -------------------------------------------------------------------------
-
-    def _run_co_motion(
-        self,
-        dets: Tuple[Detection, ...],
-        node_ids: Dict[Detection, int],
-        anchor_velocities: Optional[Dict[Any, Tuple[float, ...]]],
-    ) -> None:
-        if not anchor_velocities or len(anchor_velocities) < 2:
-            return
-
-        rep_by_anchor: Dict[Any, Detection] = {}
-        for d in dets:
-            if d.alpha in anchor_velocities and d.alpha not in rep_by_anchor:
-                rep_by_anchor[d.alpha] = d
-
-        anchors = sorted(
-            (a for a in rep_by_anchor.keys()),
-            key=serialize_value,
-        )
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for i in range(len(anchors)):
-            for j in range(i + 1, len(anchors)):
-                a, b = anchors[i], anchors[j]
-                va = anchor_velocities.get(a)
-                vb = anchor_velocities.get(b)
-                if va is None or vb is None or len(va) < 3 or len(vb) < 3:
-                    continue
-                if not all(math.isfinite(x) for x in va[:3]):
-                    continue
-                if not all(math.isfinite(x) for x in vb[:3]):
-                    continue
-                na = math.sqrt(sum(x * x for x in va[:3]))
-                nb = math.sqrt(sum(x * x for x in vb[:3]))
-                if na < EPSILON or nb < EPSILON:
-                    continue
-                cos_sim = sum(x * y for x, y in zip(va[:3], vb[:3])) / (na * nb)
-                signal = 0.5 * (1.0 + clamp(cos_sim, -1.0, 1.0))
-                da = rep_by_anchor[a]
-                db = rep_by_anchor[b]
-                src = node_ids[da]
-                dst = node_ids[db]
-                if src == dst:
-                    continue
-                a_id, b_id = (src, dst) if src < dst else (dst, src)
-                # Common-fate measurements retain the legacy
-                # EDGE_CO_MOTION writer key but canonicalize into MATERIAL.
-                # MT common fate is direction- and speed-tuned, so a single
-                # normalised dot product under-describes the relation. na / nb
-                # are the finite-checked per-pair speeds.
-                V = max(P.MOTION_SPEED_MAX, 1e-6)
-                speed_bin = _bin8(math.log2(max(0.5 * (na + nb), V * 2.0 ** -6) / V), -6.0, 0.0)
-                lead = va if na >= nb else vb
-                heading = _safe_atan2(lead[1], lead[0]) % (2.0 * math.pi)
-                heading_bin = float(int(round(heading / (2.0 * math.pi) * 24)) % 24)
-                ratio_bin = _bin8(abs(math.log2(na / nb)), 0.0, 3.0)
-                ang_bin = _bin8(math.acos(clamp(cos_sim, -1.0, 1.0)), 0.0, math.pi)
-                # [P2] THE NAMED WRITER: the mean speed as a LOG2 speed
-                # ratio, the heading in RADIANS, the speed ratio as an
-                # absolute log2 ratio and the angle between the velocities
-                # in RADIANS.
-                ep = _edge_params(
-                    "EDGE_CO_MOTION",
-                    {"mean_speed": math.log2(max(0.5 * (na + nb),
-                                                 V * 2.0 ** -6) / V),
-                     "heading": heading,
-                     "speed_ratio": abs(math.log2(na / nb)),
-                     "angle_diff": math.acos(clamp(cos_sim, -1.0, 1.0))},
-                    sign=1,
-                    confidence=float(clamp(signal, 0.0, 1.0)),
-                )
-                candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
-        self._process_channel(EdgeType.MATERIAL, candidates)
 
     # -------------------------------------------------------------------------
     # Topology (directed) — D6
@@ -4587,48 +4579,60 @@ class Binder:
         self._process_channel(EdgeType.PROXIMITY, candidates)
 
     # -------------------------------------------------------------------------
-    # Stream Binding (contour-surface contact) — Stage 1.2
+    # Stream binding contacts (PROXIMITY) — Stage 1.2
     # -------------------------------------------------------------------------
 
     def _run_stream_binding(
         self,
         dets: Tuple[Detection, ...],
         node_ids: Dict[Detection, int],
+        anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """Emit symmetric SURFACE contacts between contour and surface anchors."""
-        if not self._contour_surface_contacts:
+        """Represent measured contour/surface cross-stream contacts as proximity.
+
+        The contact list supplies spatial evidence, but not compatible surface
+        normals or material measurements. Keep it out of SURFACE, whose
+        emitters require those additional cues.
+        """
+        if not self._contour_surface_contacts or not anchor_positions:
             return
 
         rep_by_anchor: Dict[Any, Detection] = {}
         for d in dets:
-            if d.alpha not in rep_by_anchor:
-                rep_by_anchor[d.alpha] = d
+            rep_by_anchor.setdefault(d.alpha, d)
 
-        candidates: List[Tuple[int, int, float, Tuple[Any, ...], EdgeParams]] = []
+        r_scale = max(float(self._step_extraction_scale), 1.0)
+        candidates: List[
+            Tuple[int, int, float, Tuple[Any, ...], EdgeParams]
+        ] = []
         for c_anchor, s_anchor, signal in self._contour_surface_contacts:
             d_contour = rep_by_anchor.get(c_anchor)
             d_surface = rep_by_anchor.get(s_anchor)
-            if d_contour is None or d_surface is None:
+            pa = anchor_positions.get(c_anchor)
+            pb = anchor_positions.get(s_anchor)
+            if d_contour is None or d_surface is None or pa is None or pb is None:
                 continue
-
-            # Node ID 0 is valid — do not use `if not u`
-            u = node_ids.get(d_contour)
-            v = node_ids.get(d_surface)
+            u, v = node_ids.get(d_contour), node_ids.get(d_surface)
             if u is None or v is None or u == v:
                 continue
-
+            dist = _pos_dist(pa, pb)
+            if not math.isfinite(dist) or dist > 2.5 * r_scale:
+                continue
+            if dist > 1e-9:
+                bearing = math.atan2(float(pb[1]) - float(pa[1]),
+                                     float(pb[0]) - float(pa[0])) % math.pi
+            else:
+                bearing = None
             src, dst = (u, v) if u < v else (v, u)
-            # [P2] THE NAMED WRITER: the membership is a 0/1 FLAG; the
-            # strength travels in the confidence.
             ep = _edge_params(
-                "EDGE_REGION_CONTENT",
-                {"containment": 1.0},
+                EdgeType.PROXIMITY,
+                {"distance": dist, "bearing": bearing, "scale_ratio": None},
                 sign=1,
                 confidence=float(clamp(signal, 0.0, 1.0)),
             )
-            candidates.append((src, dst, signal, (src, dst), ep))
+            candidates.append((src, dst, float(signal), (src, dst), ep))
 
-        self._process_channel(EdgeType.SURFACE, candidates)
+        self._process_channel(EdgeType.PROXIMITY, candidates)
 
     def _run_orientation_continuity(
         self,
@@ -4793,124 +4797,161 @@ class Binder:
         node_ids: Dict[Detection, int],
         anchor_positions: Optional[Dict[Any, Tuple[float, ...]]],
     ) -> None:
-        """[v8] Similar surface properties link. Node rep is Position
-        (not Color/Texture) so the resulting edges integrate with the
-        spatial subgraph used by Rule 2 family resolution.
+        """Bind nearby anchors only when appearance and surface normals agree.
 
-        Capability gate: fires only when at least two anchors share a
-        common surface modality. Spread gate: skips all-equal signals
-        so a uniform scene cannot lay a constant-signal clique."""
+        A spatial hash limits candidates to a local neighbourhood. Missing
+        normal or material evidence is an abstention: this emitter must not
+        turn a global color/texture cross-product into SURFACE edges.
+        """
         if not anchor_positions:
             return
 
         colors: Dict[Any, Tuple[float, float, float]] = {}
         textures: Dict[Any, Tuple[float, float]] = {}
+        normals: Dict[Any, Tuple[float, float, float]] = {}
         for d in dets:
             if d.k == "Color" and len(d.sigma.quantized) >= 3:
-                # [O2] The colour triple, by name: the opponent
-                # luminance / red-green / blue-yellow, or the raw
-                # red / green / blue on the legacy path.
                 if getattr(d.sigma, "class_", "") == "COLOR_LEGACY":
-                    colors[d.alpha] = slot_values(
+                    values = _normalized_signature_slots(
                         d.sigma, "COLOR_LEGACY", ("r", "g", "b"))
                 else:
-                    colors[d.alpha] = slot_values(
+                    values = _normalized_signature_slots(
                         d.sigma, "COLOR", ("lum", "rg", "by"))
+                if values is not None:
+                    colors[d.alpha] = values
             elif d.k == "Texture" and len(d.sigma.quantized) >= 2:
-                # [O2] The texture pair, by name.
-                textures[d.alpha] = slot_values(
+                values = _normalized_signature_slots(
                     d.sigma, "TEXTURE", ("roughness", "isotropy"))
-
-        if len(colors) < 2 and len(textures) < 2:
-            return
+                if values is not None:
+                    textures[d.alpha] = values
+            elif d.k == "Surface":
+                normal = _surface_normal(d)
+                if normal is not None:
+                    normals[d.alpha] = normal
 
         rep: Dict[Any, Detection] = {}
         for d in dets:
-            if d.k != "Position":
-                continue
-            if d.alpha not in anchor_positions:
-                continue
-            if d.alpha not in rep:
-                rep[d.alpha] = d
-        anchors = sorted(rep.keys(), key=serialize_value)
+            if (d.k == "Position" and d.alpha in anchor_positions
+                    and d.alpha in normals
+                    and (d.alpha in colors or d.alpha in textures)):
+                rep.setdefault(d.alpha, d)
+        anchors = sorted(rep, key=serialize_value)
         if len(anchors) < 2:
             return
 
-        sigma_c = P.SURFACE_GROUPING_SIGMA_C
-        sigma_t = P.SURFACE_GROUPING_SIGMA_T
-
-        raw: List[Tuple[int, int, float, Tuple[Any, ...]]] = []
-        for i in range(len(anchors)):
-            for j in range(i + 1, len(anchors)):
-                a, b = anchors[i], anchors[j]
-                sig = 1.0
-                have_any = False
-                if a in colors and b in colors:
-                    ca, cb = colors[a], colors[b]
-                    d_c = math.sqrt(sum((x - y) ** 2 for x, y in zip(ca, cb)))
-                    sig *= math.exp(-d_c / sigma_c)
-                    have_any = True
-                if a in textures and b in textures:
-                    ta, tb = textures[a], textures[b]
-                    d_t = math.sqrt(sum((x - y) ** 2 for x, y in zip(ta, tb)))
-                    sig *= math.exp(-d_t / sigma_t)
-                    have_any = True
-                if not have_any:
-                    continue
-                if sig < P.SURFACE_GROUPING_MIN_SIGNAL:
-                    continue
-                src = node_ids[rep[a]]
-                dst = node_ids[rep[b]]
-                if src == dst:
-                    continue
-                a_id, b_id = (src, dst) if src < dst else (dst, src)
-                # [Pass 22] First real EdgeParams for this channel. Every slot
-                # is computed; the neutral 4.0 centres represent "this
-                # modality is absent", which is a real absence, not a
-                # fabricated constant.
-                color_dist = None
-                if a in colors and b in colors:
-                    ca, cb = colors[a], colors[b]
-                    d_c = math.sqrt(sum((x - y) ** 2 for x, y in zip(ca, cb)))
-                    color_dist = d_c / max(sigma_c, 1e-6)
-                tex_dist = None
-                if a in textures and b in textures:
-                    ta, tb = textures[a], textures[b]
-                    d_t = math.sqrt(sum((x - y) ** 2 for x, y in zip(ta, tb)))
-                    tex_dist = d_t / max(sigma_t, 1e-6)
-                contrast_step = None
-                if a in colors and b in colors:
-                    lum_a = float(colors[a][0])
-                    lum_b = float(colors[b][0])
-                    contrast_step = abs(lum_a - lum_b) / (lum_a + lum_b + 1.0)
-                L = self._step_l_med
-                spatial_dist = None
-                if L > 0.0:
-                    pa_p = anchor_positions.get(a)
-                    pb_p = anchor_positions.get(b)
-                    if pa_p is not None and pb_p is not None and len(pa_p) >= 2 and len(pb_p) >= 2:
-                        spatial_dist = math.log2(1.0 + math.hypot(
-                            pb_p[0] - pa_p[0], pb_p[1] - pa_p[1]) / L)
-                # [P2] THE NAMED WRITER: the colour and texture distances in
-                # their own sigma units, the Weber contrast as a fraction and
-                # the separation as a LOG2 SPACING.
-                ep = _edge_params(
-                    "EDGE_SURFACE_GROUPING",
-                    {"color_dist": color_dist, "tex_dist": tex_dist,
-                     "contrast_step": contrast_step,
-                     "spatial_dist": spatial_dist},
-                    sign=1,
-                    confidence=float(clamp(sig, 0.0, 1.0)),
-                )
-                raw.append((a_id, b_id, sig, (a_id, b_id), ep))
-
-        if not raw:
+        spacing = max(float(self._step_l_med),
+                      float(self._step_extraction_scale), 1.0)
+        radius = float(P.SURFACE_GROUPING_RADIUS_MULT) * spacing
+        if not math.isfinite(radius) or radius <= 0.0:
             return
-        if len(raw) >= 2:
-            sigs = [c[2] for c in raw]
-            if max(sigs) - min(sigs) < P.SURFACE_GROUPING_SPREAD_MIN:
+
+        positions: Dict[Any, Tuple[float, float]] = {}
+        cells: Dict[Tuple[int, int], List[Any]] = defaultdict(list)
+        for anchor in anchors:
+            pos = anchor_positions.get(anchor)
+            if (pos is None or len(pos) < 2
+                    or not math.isfinite(float(pos[0]))
+                    or not math.isfinite(float(pos[1]))):
+                continue
+            xy = (float(pos[0]), float(pos[1]))
+            positions[anchor] = xy
+            cell = (math.floor(xy[0] / radius), math.floor(xy[1] / radius))
+            cells[cell].append(anchor)
+        anchors = [a for a in anchors if a in positions]
+        if len(anchors) < 2:
+            return
+
+        # Build each local pair once. With cell width equal to the hard radius,
+        # any pair closer than the radius lies in this cell or an adjacent one.
+        anchor_order = {a: serialize_value(a) for a in anchors}
+        pairs: Set[Tuple[Any, Any]] = set()
+        for cell in sorted(cells):
+            here = cells[cell]
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    for a in here:
+                        for b in cells.get((cell[0] + ox, cell[1] + oy), ()):
+                            if a == b:
+                                continue
+                            pair = ((a, b) if anchor_order[a] < anchor_order[b]
+                                    else (b, a))
+                            pairs.add(pair)
+
+        sigma_c = max(float(P.SURFACE_GROUPING_SIGMA_C), 1e-6)
+        sigma_t = max(float(P.SURFACE_GROUPING_SIGMA_T), 1e-6)
+        max_normal_angle = math.radians(
+            float(P.SURFACE_GROUPING_MAX_NORMAL_DEG))
+        max_material_diff = float(P.SURFACE_GROUPING_MAX_MATERIAL_DIFF)
+        candidates: List[
+            Tuple[int, int, float, Tuple[Any, ...], EdgeParams]
+        ] = []
+
+        for a, b in sorted(pairs, key=lambda pair: (
+                anchor_order[pair[0]], anchor_order[pair[1]])):
+            pa, pb = positions[a], positions[b]
+            dist = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            if dist > radius:
+                continue
+
+            na, nb = normals[a], normals[b]
+            dot = clamp(sum(na[k] * nb[k] for k in range(3)), -1.0, 1.0)
+            normal_angle = math.acos(dot)
+            if normal_angle > max_normal_angle:
+                continue
+
+            material_similarity = 1.0
+            material_diffs = []
+            have_material = False
+            if a in colors and b in colors:
+                ca, cb = colors[a], colors[b]
+                d_c = math.sqrt(sum((x - y) ** 2 for x, y in zip(ca, cb)))
+                material_diffs.append(min(1.0, d_c / math.sqrt(3.0)))
+                material_similarity *= math.exp(-d_c / sigma_c)
+                have_material = True
+            if a in textures and b in textures:
+                ta, tb = textures[a], textures[b]
+                d_t = math.sqrt(sum((x - y) ** 2 for x, y in zip(ta, tb)))
+                material_diffs.append(min(1.0, d_t / math.sqrt(2.0)))
+                material_similarity *= math.exp(-d_t / sigma_t)
+                have_material = True
+            if not have_material:
+                continue
+            material_diff = max(material_diffs)
+            if (material_diff > max_material_diff
+                    or material_similarity < P.SURFACE_GROUPING_MIN_SIGNAL):
+                continue
+
+            spatial_similarity = math.exp(-dist / spacing)
+            normal_similarity = math.exp(
+                -normal_angle / max(max_normal_angle, 1e-6))
+            signal = spatial_similarity * normal_similarity * material_similarity
+            if signal <= 0.0:
+                continue
+
+            da, db = rep[a], rep[b]
+            src, dst = node_ids.get(da), node_ids.get(db)
+            if src is None or dst is None or src == dst:
+                continue
+            a_id, b_id = (src, dst) if src < dst else (dst, src)
+            spatial_dist = math.log2(1.0 + dist / spacing)
+            ep = _edge_params(
+                "EDGE_SURFACE_GROUPING",
+                {"normal_angle": normal_angle,
+                 "material_diff": material_diff,
+                 "slant_diff": None,
+                 "spatial_dist": spatial_dist},
+                sign=1,
+                confidence=float(clamp(signal, 0.0, 1.0)),
+            )
+            candidates.append((a_id, b_id, signal, (a_id, b_id), ep))
+
+        if not candidates:
+            return
+        if len(candidates) >= 2:
+            signals = [candidate[2] for candidate in candidates]
+            if max(signals) - min(signals) < P.SURFACE_GROUPING_SPREAD_MIN:
                 return
-        self._process_channel(EdgeType.SURFACE, raw)
+        self._process_channel(EdgeType.SURFACE, candidates)
 
     # -------------------------------------------------------------------------
     def _run_curvature(

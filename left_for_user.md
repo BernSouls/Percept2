@@ -1,22 +1,25 @@
 # Follow-Up Notes for the User
 
-## Completed and verified
+## Completed in this pass
 
-The requested edge consolidation and pipeline wiring are implemented. The canonical enum and parameter-name set contain exactly `PROXIMITY`, `CONTINUITY`, `CONTAINMENT`, `OCCLUSION`, `JUNCTION`, `SURFACE`, `SHAPE`, and `MATERIAL`; physical population axes match across `core.schema` and the parameter registry. The contour spine uses `PEAK_CHAIN`, with `ContourLens` default-disabled. Binder now emits intra-step edges immediately, accumulates per-channel state across sub-passes, finalizes homeostasis once, retains geometric signal separately from endpoint-minimum confidence, preserves directed containment/occlusion, and routes co-motion and signed anti-phase evidence through `MATERIAL`.
+- Preserved exactly eight canonical `EdgeType`s: `PROXIMITY`, `CONTINUITY`, `CONTAINMENT`, `OCCLUSION`, `JUNCTION`, `SURFACE`, `SHAPE`, and `MATERIAL`. Temporal `ConceptFamily` and action/schema values remain in the model; Binder does not claim to emit temporal edge types.
+- Kept spatially gated surface grouping and the measured SurfaceFragment/legacy surface-fold paths. `SURFACE` grouping and shared-boundary emitters now require spatial proximity, compatible measured normal cues, and appearance similarity. Quantized color, texture, and surface-patch slots are compared as normalized bin centers; circular surface hue uses shortest-arc distance.
+- Reclassified cross-stream contour/surface contacts that lack normal/material measurements as `PROXIMITY`, not `SURFACE`.
+- Kept `MATERIAL` appearance-only and co-motion disabled pending video input plus an approved kinematic representation. Anti-phase figure-ground evidence is negative-sign `OCCLUSION` with `source_cue=3`; positive depth occlusion remains directed near→far with sign `+1`.
+- Removed the four tracked root inline verification/diagnostic blocks and restored their original line endings. Updated the stale Binder, schema, parameter, and documentation claims.
 
-Verification completed after the final code edits:
+## Verification
 
-- All repository Python files passed `py_compile`.
-- Temporary contract checks passed for the eight-category taxonomy and physical axes, `MATERIAL` co-motion with `confidence=min(z_a,z_b)`, negative anti-phase rerouting, and directed positive `CONTAINMENT`.
-- Positive shape controls passed for radiality, concentricity, and spirality; a box-over-box chain emitted no false candidates for those three degeneracy-sensitive emitters.
-- The full 256×256 two-step box-over-box trace passed. Its independently rendered images were identical, and two fresh pipeline runs matched exactly at `1,467` pattern nodes and `2,371` edges. See [`integration_trace.md`](integration_trace.md) for counts and measurements.
+- `py_compile` passed for all tracked Python files; `git -c core.whitespace=cr-at-eol diff --check` passed (the override recognizes restored CRLF files).
+- The two-step static box-over-box trace completed with the current source. `SURFACE=4→4`, `SHAPE=10→10`, and `MATERIAL=196→196`; the full category table is in [`integration_trace.md`](integration_trace.md).
+- Temporary targeted checks passed for the eight-category enum, positive and negative `OCCLUSION` signs, co-motion refusal as `MATERIAL`, positive/negative `SURFACE` gate cases (spatial, normal, appearance, missing cues), and cross-stream `PROXIMITY` routing.
+- Runtime checks used the repository code with temporary `/tmp` package-path symlinks and compatibility shims. No standard test suite is present, and the referenced `diagnostics/_u20_gate.py` is absent; no `WRONG=0` result is reported.
 
-## Remaining follow-up
+## Remaining validation
 
-1. **Surface-grouping selectivity:** on the same static image, graph `SURFACE` edges rise from `54` after step 0 to `1,069` after step 1 (`1,015` new edges), with the increase occurring in the repeated V1 surface-grouping pass. The current trace does not isolate which raw detections or candidate pairs drive it. Inspect duplicate grouping and candidate gates while retaining the eight-category taxonomy.
-2. **Dynamic multi-object validation:** co-motion and anti-phase routing passed targeted contract checks, but the image trace is intentionally static and does not validate longer dynamic sequences. `P.ANTIPHASE_ENABLED` remains disabled by default; the negative-to-`MATERIAL` route was tested directly, not exercised by the box image.
-3. **Depth-layer corpus:** the test image produced 7 oriented and 2 depth-layer-only SurfaceFragment detections. The depth-only signatures correctly omit fabricated surface measurements. `Observation2D.get_t_junctions()` returned zero for this frame; ownership/fragment ordering still assigned ten fragments to two ordinal layers. Validate this path on additional occlusion geometries, especially frames with weak ownership probabilities.
-4. **Contour gate:** `ContourLens` remains disabled by default as requested. Any future enabling should be validated against the `PEAK_CHAIN` spine and should not revive the former contour-structure path implicitly.
-5. **Packaged test/runtime entry point:** this checkout contains no standard test suite and lacks the original top-level `perception.*`, `sensory_floor`, `learning`, and `memory` package wrappers. Runtime checks used temporary import-path symlinks and import-only compatibility stubs under `/tmp`; those are not committed. Add a reproducible package/test entry point before relying on these checks as CI coverage.
+1. Run the pipeline through the intended packaged runtime/CI entry point once the repository's omitted top-level import packages and test entry point are available.
+2. Exercise anti-phase with controlled dynamic/occlusion scenes before enabling `P.ANTIPHASE_ENABLED` (it remains off by default). Keep co-motion gated until both video input and an approved kinematic representation exist.
+3. Test the surface gates on a broader variety of materials, slants, folds, and weak ownership cases. The current static image validates stability on one scene, not general perception quality.
+4. Keep the historical `SURFACE=54→1,069` trace labeled as pre-gate/pre-routing behavior; it is not directly comparable to the current `4→4` trace.
 
-Earlier additional-edge proposals are superseded. Any deferred relation work should refine measurements, emitters, or gates within the eight canonical categories; see [`missing_edges.md`](missing_edges.md).
+Deferred refinements must remain within the eight canonical categories; see [`missing_edges.md`](missing_edges.md).

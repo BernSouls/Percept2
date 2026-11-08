@@ -13,7 +13,8 @@ from core.types import EdgeType
 #   * PROXIMITY.bearing: axial orientation in [0, pi) (circular=True; None when
 #     dist == 0 so co-located pairs emit a truthful uniform distribution).
 #   * CONTAINMENT.polar_angle: full-circle bearing in [0, 2*pi) (circular=True).
-#   * OCCLUSION: positive near -> far ordinal depth claims only (sign=+1).
+#   * OCCLUSION: sign=+1 is directed near -> far ordinal depth; sign=-1 is
+#     repulsive figure-ground segregation (source_cue=3), not material evidence.
 EDGE_SCHEMA: Dict[EdgeType, Tuple[PopAxis, ...]] = {
     EdgeType.PROXIMITY: (
         PopAxis("distance", 8, 0.0, 4.0, circular=False),

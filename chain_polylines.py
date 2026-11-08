@@ -504,24 +504,6 @@ def chain_polyline_for_detection(
         area=area, centroid=(cx, cy), length=length,
     )
 
-
-
-if __name__ == "__main__":
-    # smoke: a square ring must give 4 roughly equal right turns.
-    sq = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
-    g = chain_polyline_for_detection(
-        type("D", (), {"alpha": 1,
-                       "sigma": type("S", (), {"quantized": (4, 0, 0, 1, 0, 0)})(),
-                       "rho": (("entity", 1, 0, "+"),
-                               ("member", "m0", 0, "+"),
-                               ("member", "m1", 1, "+"),
-                               ("member", "m2", 2, "+"),
-                               ("member", "m3", 3, "+"))})(),
-        {"m0": sq[0], "m1": sq[1], "m2": sq[2], "m3": sq[3]})
-    print("closed:", g["closed"], "area:", round(g["area"], 2),
-          "turns:", [round(x, 3) for x in g["turns"]])
-
-
 def chain_is_closed(det: Any) -> bool:
     """Whether a PEAK_CHAIN detection reports itself as a closed ring.
 

@@ -303,26 +303,3 @@ def flank_signature_slots(f: Dict[str, Any]) -> Dict[str, float]:
         "lum_level_bin": _g(f['mean_lum_left'], 1.0),
         "side_bin": _g(side, 1.0),
     }
-
-
-if __name__ == '__main__':
-    # smoke: a vertical edge (left dark, right bright) with 2 flanks
-    # edge at x=10, so a chain running down x=10 has its two flanks at
-    # x=0 (dark) and x=20 (bright) -- the edge lies BETWEEN them
-    ch = {'lum': np.zeros((64, 64)) + 0.2}
-    ch['lum'][:, 10:] = 0.8
-    from perception.chain_polylines import chain_polyline_for_detection
-
-    class _D:
-        alpha = 1
-        sigma = type('S', (), {'quantized': (3, 0, 0, 0, 0, 0)})()
-        rho = (('entity', 1, 0, '+'),
-               ('member', 'a', 0, '+'),
-               ('member', 'b', 1, '+'),
-               ('member', 'c', 2, '+'))
-    pos = {'a': (10.0, 20.0), 'b': (10.0, 40.0), 'c': (10.0, 60.0)}
-    f = chain_flank_fields(_D(), pos, 20.0, ch, (64, 64))
-    print('members:', f['n_members'])
-    print('mean lum left/right: %.3f / %.3f'
-          % (f['mean_lum_left'], f['mean_lum_right']))
-    print('slots:', flank_signature_slots(f))
